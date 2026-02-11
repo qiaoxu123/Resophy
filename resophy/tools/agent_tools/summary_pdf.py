@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List
 
+from resophy import dal
 from resophy.core.base_paper import Paper
 from resophy.core.paper_store import paper_store
 
@@ -69,6 +70,13 @@ INPUT: <MARKDOWN>"""
         log_lines = task_info["logs"]
         log_lock = task_info["log_lock"]
         process = None
+
+    # Dual-write: sync task status to DB
+    dal.update_paper_shared(paper_id, {
+        "analysis_status": "running",
+        "analysis_task_id": task_id,
+        "status_updated_at": start_time.isoformat(),
+    })
 
     def read_output(pipe, label):
         """Read subprocess output in real time"""
@@ -445,6 +453,13 @@ INPUT: <MARKDOWN>"""
                 if search_and_update_analysis_time(child):
                     break
 
+        # Dual-write: sync completed status + output path to DB
+        dal.update_paper_shared(paper_id, {
+            "analysis_result_path": result_file,
+            "analysis_status": "completed",
+            "status_updated_at": datetime.now().isoformat(),
+        })
+
         with deps.analysis_tasks_lock:
             deps.analysis_tasks[task_id]["status"] = "completed"
             deps.analysis_tasks[task_id]["result"] = {
@@ -454,6 +469,7 @@ INPUT: <MARKDOWN>"""
             }
 
     except subprocess.TimeoutExpired:
+        dal.update_paper_shared(paper_id, {"analysis_status": "failed"})
         with deps.analysis_tasks_lock:
             deps.analysis_tasks[task_id]["status"] = "failed"
             deps.analysis_tasks[task_id]["result"] = {
@@ -467,6 +483,7 @@ INPUT: <MARKDOWN>"""
         import traceback
 
         traceback.print_exc()
+        dal.update_paper_shared(paper_id, {"analysis_status": "failed"})
         with deps.analysis_tasks_lock:
             deps.analysis_tasks[task_id]["status"] = "failed"
             deps.analysis_tasks[task_id]["result"] = {

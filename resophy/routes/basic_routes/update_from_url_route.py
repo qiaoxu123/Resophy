@@ -9,8 +9,9 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Protocol
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 
+from resophy import dal
 from resophy.core.base_paper import Paper
 from resophy.core.paper_store import PaperStore
 from resophy.tools.basic_tools.upload_paper import (
@@ -101,31 +102,10 @@ def register_update_from_url_routes(
     get_category_path: GetCategoryPathFn,
     create_category_folder: CreateCategoryFolderFn,
     save_paper_metadata: SavePaperMetadataFn,
-    reading_list_file: str,
+    reading_list_file: str = "",  # Deprecated, kept for backward compat
     reading_list_temp_dir: str,
     paper_store: PaperStore,
 ) -> None:
-    def _load_reading_list() -> list[str]:
-        try:
-            with open(reading_list_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("papers", [])
-        except Exception as exc:  # noqa: BLE001
-            print(f"Failed to read to-be-read list: {exc}")
-            return []
-
-    def _save_reading_list(paper_ids: list[str]) -> None:
-        try:
-            with open(reading_list_file, "w", encoding="utf-8") as f:
-                json.dump({"papers": paper_ids}, f, ensure_ascii=False, indent=2)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Failed to save to-read list: {exc}")
-
-    def _add_to_reading_list(paper_id: str) -> None:
-        paper_ids = _load_reading_list()
-        if paper_id not in paper_ids:
-            paper_ids.append(paper_id)
-            _save_reading_list(paper_ids)
 
     def _fetch_dblp_bibtex_background(
         paper_id: str,
@@ -149,7 +129,8 @@ def register_update_from_url_routes(
                         paper, category_id=category_id, category_path=category_path
                     )
                     save_paper_metadata(file_path, paper)
-                    print(f"[Backstage DBLP] ✅ BibTeX updated: {paper_id}")
+                    dal.update_paper_shared(paper_id, {"bibtex": bibtex})
+                    print(f"[Backstage DBLP] BibTeX updated: {paper_id}")
                 else:
                     print(f"[Backstage DBLP] ❌ Paper not found: {paper_id}")
             else:
@@ -289,11 +270,57 @@ def register_update_from_url_routes(
             if use_temp_dir:
                 paper.upload_source = "reading_list_url"
 
+            # Check for duplicate by arxiv_id before inserting
+            existing = dal.find_paper_by_arxiv_id(arxiv_id)
+            if existing:
+                # Paper exists, just link to user
+                dal.link_user_paper(
+                    g.user_id, existing["id"],
+                    category_id=category_id,
+                    upload_source="arxiv",
+                )
+                dal.add_to_reading_list(g.user_id, existing["id"])
+                existing_paper = paper_store.get(existing["id"])
+                if existing_paper:
+                    # Clean up downloaded duplicate file
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                    return jsonify({"success": True, "paper": existing_paper.to_dict(), "deduplicated": True})
+
             registered_paper = paper_store.upsert(
                 paper, category_id=category_id, category_path=category_path
             )
             save_paper_metadata(file_path, registered_paper)
-            _add_to_reading_list(registered_paper.id)
+
+            # Compute content hash
+            import hashlib
+            with open(file_path, "rb") as fh:
+                content_hash = hashlib.sha256(fh.read()).hexdigest()
+
+            # Dual-write: insert into papers + link user
+            dal.insert_paper(registered_paper.id, {
+                "content_hash": content_hash,
+                "title": registered_paper.title,
+                "authors": registered_paper.authors,
+                "abstract": registered_paper.abstract,
+                "year": registered_paper.year,
+                "arxiv_id": arxiv_id,
+                "arxiv_url": registered_paper.arxiv_url,
+                "arxiv_published_date": registered_paper.arxiv_published_date,
+                "affiliation": registered_paper.affiliation,
+                "keywords": registered_paper.keywords,
+                "subject": registered_paper.subject,
+                "summary": registered_paper.summary,
+                "pdf_storage_path": file_path,
+                "original_filename": filename,
+                "uploaded_by": g.user_id,
+            })
+            dal.link_user_paper(
+                g.user_id, registered_paper.id,
+                category_id=category_id,
+                upload_source="arxiv",
+            )
+            dal.add_to_reading_list(g.user_id, registered_paper.id)
 
             # 【Background acquisition BibTeX(priority DBLP, use after failure arXiv）】
             if metadata.get("title"):

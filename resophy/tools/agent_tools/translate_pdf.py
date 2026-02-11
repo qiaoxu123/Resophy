@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List
 
+from resophy import dal
 from resophy.core.base_paper import Paper
 from resophy.core.paper_store import paper_store
 
@@ -43,6 +44,13 @@ def translate_paper_task(
         log_lines = task_info["logs"]
         log_lock = task_info["log_lock"]
         process = None
+
+    # Dual-write: sync task status to DB
+    dal.update_paper_shared(paper_id, {
+        "translation_status": "running",
+        "translation_task_id": task_id,
+        "status_updated_at": start_time.isoformat(),
+    })
 
     def read_output(pipe, label):
         """Read subprocess output in real time"""
@@ -201,6 +209,13 @@ def translate_paper_task(
                             if search_and_update_time(child):
                                 break
 
+                    # Dual-write: sync completed status + output path to DB
+                    dal.update_paper_shared(paper_id, {
+                        "chinese_pdf_path": dual_file,
+                        "translation_status": "completed",
+                        "status_updated_at": end_time.isoformat(),
+                    })
+
                     deps.translation_tasks[task_id]["status"] = "completed"
                     deps.translation_tasks[task_id]["result"] = {
                         "success": True,
@@ -208,12 +223,14 @@ def translate_paper_task(
                         "log_file": log_file,
                     }
                 else:
+                    dal.update_paper_shared(paper_id, {"translation_status": "failed"})
                     deps.translation_tasks[task_id]["status"] = "failed"
                     deps.translation_tasks[task_id]["result"] = {
                         "success": False,
                         "error": "Translation file not generated",
                     }
             else:
+                dal.update_paper_shared(paper_id, {"translation_status": "failed"})
                 deps.translation_tasks[task_id]["status"] = "failed"
                 deps.translation_tasks[task_id]["result"] = {
                     "success": False,
@@ -221,6 +238,7 @@ def translate_paper_task(
                 }
 
     except subprocess.TimeoutExpired:
+        dal.update_paper_shared(paper_id, {"translation_status": "failed"})
         with deps.translation_tasks_lock:
             deps.translation_tasks[task_id]["status"] = "failed"
             deps.translation_tasks[task_id]["result"] = {
@@ -234,6 +252,7 @@ def translate_paper_task(
         import traceback
 
         traceback.print_exc()
+        dal.update_paper_shared(paper_id, {"translation_status": "failed"})
         with deps.translation_tasks_lock:
             deps.translation_tasks[task_id]["status"] = "failed"
             deps.translation_tasks[task_id]["result"] = {

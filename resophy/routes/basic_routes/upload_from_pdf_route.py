@@ -8,9 +8,10 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Protocol
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 from werkzeug.utils import secure_filename
 
+from resophy import dal
 from resophy.core.base_paper import Paper
 from resophy.core.paper_store import PaperStore
 from resophy.tools.basic_tools.upload_paper import (
@@ -58,30 +59,9 @@ def register_upload_from_pdf_routes(
     get_category_path: GetCategoryPathFn,
     create_category_folder: CreateCategoryFolderFn,
     save_paper_metadata: SavePaperMetadataFn,
-    reading_list_file: str,
+    reading_list_file: str = "",  # Deprecated, kept for backward compat
     paper_store: PaperStore,
 ) -> None:
-    def _load_reading_list() -> list[str]:
-        try:
-            with open(reading_list_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("papers", [])
-        except Exception as exc:  # noqa: BLE001
-            print(f"Failed to read to-be-read list: {exc}")
-            return []
-
-    def _save_reading_list(paper_ids: list[str]) -> None:
-        try:
-            with open(reading_list_file, "w", encoding="utf-8") as f:
-                json.dump({"papers": paper_ids}, f, ensure_ascii=False, indent=2)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Failed to save to-read list: {exc}")
-
-    def _add_to_reading_list(paper_id: str) -> None:
-        paper_ids = _load_reading_list()
-        if paper_id not in paper_ids:
-            paper_ids.append(paper_id)
-            _save_reading_list(paper_ids)
 
     def _process_pdf_metadata_background(
         paper_id: str,
@@ -157,7 +137,24 @@ def register_upload_from_pdf_routes(
                     paper, category_id=category_id, category_path=category_path
                 )
                 save_paper_metadata(new_file_path, paper)
-                print(f"[Backstage stage1] ✅ arXiv Information has been updated: {new_filename}")
+
+                # Dual-write: sync metadata to DB
+                dal.update_paper_shared(paper_id, {
+                    "title": paper.title,
+                    "authors": paper.authors,
+                    "abstract": paper.abstract,
+                    "year": paper.year,
+                    "arxiv_id": paper.arxiv_id,
+                    "arxiv_url": paper.arxiv_url,
+                    "arxiv_published_date": paper.arxiv_published_date,
+                    "affiliation": paper.affiliation,
+                    "keywords": paper.keywords,
+                    "subject": paper.subject,
+                    "summary": paper.summary,
+                    "pdf_storage_path": new_file_path,
+                    "original_filename": new_filename,
+                })
+                print(f"[Backstage stage1] arXiv Information has been updated: {new_filename}")
 
                 # 【stage2】Background acquisition BibTeX(priority DBLP, use after failure arXiv）
                 if paper_info.get("title") and paper_info.get("authors"):
@@ -174,7 +171,8 @@ def register_upload_from_pdf_routes(
                             paper, category_id=category_id, category_path=category_path
                         )
                         save_paper_metadata(new_file_path, paper)
-                        print(f"[Backstage stage2] ✅ BibTeX updated")
+                        dal.update_paper_shared(paper_id, {"bibtex": bibtex})
+                        print(f"[Backstage stage2] BibTeX updated")
                     else:
                         print(f"[Backstage stage2] ❌ Not obtained BibTeX")
 
@@ -261,12 +259,45 @@ def register_upload_from_pdf_routes(
         if not paper:
             return jsonify({"success": False, "error": "Failed to create thesis object"}), 500
 
+        # Compute content hash for dedup
+        import hashlib
+        with open(file_path, "rb") as fh:
+            content_hash = hashlib.sha256(fh.read()).hexdigest()
+
+        # Check for duplicate by content_hash
+        existing = dal.find_paper_by_hash(content_hash)
+        if existing:
+            # Paper already exists in DB, just link user to it
+            dal.link_user_paper(
+                g.user_id, existing["id"],
+                category_id=category_id,
+                upload_source="pdf",
+            )
+            # Load existing paper into store if not present
+            existing_paper = paper_store.get(existing["id"])
+            if existing_paper:
+                return jsonify({"success": True, "paper": existing_paper.to_dict(), "deduplicated": True})
+
         # Register now paper(Let users see)
         registered_paper = paper_store.upsert(
             paper, category_id=category_id, category_path=category_path
         )
         save_paper_metadata(file_path, registered_paper)
-        _add_to_reading_list(registered_paper.id)
+
+        # Dual-write: insert into papers table + link user
+        dal.insert_paper(registered_paper.id, {
+            "content_hash": content_hash,
+            "title": registered_paper.title,
+            "original_filename": file.filename,
+            "pdf_storage_path": file_path,
+            "uploaded_by": g.user_id,
+        })
+        dal.link_user_paper(
+            g.user_id, registered_paper.id,
+            category_id=category_id,
+            upload_source="pdf",
+        )
+        dal.add_to_reading_list(g.user_id, registered_paper.id)
 
         # Start a background thread to process metadata
         thread = threading.Thread(

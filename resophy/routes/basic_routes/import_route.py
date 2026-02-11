@@ -18,9 +18,10 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
 import requests
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, g, jsonify, request
 from werkzeug.utils import secure_filename
 
+from resophy import dal
 from resophy.core.base_paper import Paper
 from resophy.core.paper_store import PaperStore
 from resophy.tools.basic_tools.upload_paper import (
@@ -375,32 +376,11 @@ def register_import_routes(
     get_category_path: GetCategoryPathFn,
     create_category_folder: CreateCategoryFolderFn,
     save_paper_metadata: SavePaperMetadataFn,
-    reading_list_file: str,
+    reading_list_file: str = "",  # Deprecated, kept for backward compat
     paper_store: PaperStore,
     upload_folder: str,
 ) -> None:
     """Register and import related routes"""
-
-    def _load_reading_list() -> list[str]:
-        try:
-            with open(reading_list_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("papers", [])
-        except Exception:
-            return []
-
-    def _save_reading_list(paper_ids: list[str]) -> None:
-        try:
-            with open(reading_list_file, "w", encoding="utf-8") as f:
-                json.dump({"papers": paper_ids}, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-    def _add_to_reading_list(paper_id: str) -> None:
-        paper_ids = _load_reading_list()
-        if paper_id not in paper_ids:
-            paper_ids.append(paper_id)
-            _save_reading_list(paper_ids)
 
     def _check_duplicate_in_folder(folder_path: str, title: str) -> bool:
         """Check if a paper with the same name already exists in the folder"""
@@ -482,7 +462,8 @@ def register_import_routes(
                 task["last_update"] = datetime.now().isoformat()
 
     def _import_papers_task(
-        task_id: str, papers_data: List[Dict[str, Any]], target_category_id: str = ""
+        task_id: str, papers_data: List[Dict[str, Any]], target_category_id: str = "",
+        user_id: int = 0,
     ):
         """Background import task
 
@@ -749,7 +730,33 @@ def register_import_routes(
                 # Save metadata
                 save_paper_metadata(file_path, registered_paper)
 
-                # Note: Imported papers are not added to the to-read list
+                # Dual-write: insert into papers + link user
+                import hashlib
+                with open(file_path, "rb") as fh:
+                    content_hash = hashlib.sha256(fh.read()).hexdigest()
+
+                dal.insert_paper(registered_paper.id, {
+                    "content_hash": content_hash,
+                    "title": registered_paper.title,
+                    "authors": registered_paper.authors,
+                    "abstract": registered_paper.abstract,
+                    "year": registered_paper.year,
+                    "arxiv_id": arxiv_id,
+                    "arxiv_url": arxiv_url,
+                    "arxiv_published_date": registered_paper.arxiv_published_date,
+                    "keywords": registered_paper.keywords,
+                    "subject": registered_paper.subject,
+                    "summary": registered_paper.summary,
+                    "pdf_storage_path": file_path,
+                    "original_filename": pdf_filename,
+                    "uploaded_by": user_id,
+                })
+                if user_id:
+                    dal.link_user_paper(
+                        user_id, registered_paper.id,
+                        category_id=category_id,
+                        upload_source="zotero_import",
+                    )
 
                 success_count += 1
                 if is_others:
@@ -821,6 +828,7 @@ def register_import_routes(
                         paper, category_id=category_id, category_path=category_path
                     )
                     save_paper_metadata(file_path, paper)
+                    dal.update_paper_shared(paper_id, {"bibtex": bibtex})
                     print(f"[Import DBLP] ✅ BibTeX updated: {paper_id}")
         except Exception as e:
             print(f"[Import DBLP] ❌ get BibTeX fail: {e}")
@@ -941,10 +949,13 @@ def register_import_routes(
                     "cancelled": False,
                 }
 
+            # Capture user_id from request context for background thread
+            request_user_id = getattr(g, "user_id", 0)
+
             # Start the background import task (do not use daemon=True, ensure the task is completed)
             thread = threading.Thread(
                 target=_import_papers_task,
-                args=(task_id, remaining_papers, target_category_id),
+                args=(task_id, remaining_papers, target_category_id, request_user_id),
             )
             thread.start()
 
@@ -1203,10 +1214,13 @@ def register_import_routes(
                     "cancelled": False,
                 }
 
+            # Capture user_id from request context for background thread
+            request_user_id = getattr(g, "user_id", 0)
+
             # 2. Start a background task to rebuild the paper (from arXiv download PDF）
             thread = threading.Thread(
                 target=_rebuild_papers_from_json,
-                args=(task_id, upload_folder),
+                args=(task_id, upload_folder, request_user_id),
                 daemon=False,
             )
             thread.start()
@@ -1238,6 +1252,7 @@ def register_import_routes(
     def _rebuild_papers_from_json(
         task_id: str,
         papers_folder: str,
+        user_id: int = 0,
     ):
         """Background task: from JSON Metadata reconstruction paper (from arXiv download PDF）"""
         global current_import_task_id
@@ -1464,6 +1479,7 @@ def register_import_routes(
                         rel_dir.split(os.sep) if rel_dir != "." else []
                     )
 
+                    effective_category_id = "root"
                     if category_path_parts:
                         # Find or create a category
                         current_categories = get_categories()
@@ -1475,6 +1491,7 @@ def register_import_routes(
                         )
 
                         if category_id:
+                            effective_category_id = category_id
                             category_path = ["root"] + category_path_parts
                             paper_store.upsert(
                                 new_paper,
@@ -1488,6 +1505,36 @@ def register_import_routes(
                             new_paper, category_id="root", category_path=["root"]
                         )
                         save_paper_metadata(pdf_path, new_paper)
+
+                    # Dual-write: insert into papers + link user
+                    import hashlib
+                    with open(pdf_path, "rb") as fh:
+                        content_hash = hashlib.sha256(fh.read()).hexdigest()
+
+                    dal.insert_paper(new_paper.id, {
+                        "content_hash": content_hash,
+                        "title": new_paper.title,
+                        "authors": new_paper.authors,
+                        "abstract": new_paper.abstract,
+                        "year": new_paper.year,
+                        "arxiv_id": paper_meta.get("arxiv_id", ""),
+                        "arxiv_url": new_paper.arxiv_url,
+                        "arxiv_published_date": new_paper.arxiv_published_date,
+                        "affiliation": new_paper.affiliation,
+                        "keywords": new_paper.keywords,
+                        "subject": new_paper.subject,
+                        "summary": new_paper.summary,
+                        "bibtex": new_paper.bibtex,
+                        "pdf_storage_path": pdf_path,
+                        "original_filename": new_paper.original_filename,
+                        "uploaded_by": user_id,
+                    })
+                    if user_id:
+                        dal.link_user_paper(
+                            user_id, new_paper.id,
+                            category_id=effective_category_id,
+                            upload_source="export_import",
+                        )
 
                     success_count += 1
                     print(f"[Import] ✅ Imported successfully: {title[:50]}")
@@ -1531,7 +1578,7 @@ def register_import_routes(
             # Clear current task mark
             current_import_task_id = None
 
-    def _import_from_export_task_old(
+    def _import_from_export_task_old(  # noqa: C901
         task_id: str,
         papers_list: List[Dict[str, Any]],
         extract_dir: str,

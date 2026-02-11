@@ -12,8 +12,9 @@ import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, g, jsonify, request, send_file
 
+from resophy import dal
 from resophy.core.base_paper import Paper
 from resophy.core.paper_store import paper_store
 from resophy.tools.basic_tools.daily_arxiv import (
@@ -36,8 +37,8 @@ def register_daily_arxiv_routes(
     get_category_path: Callable[[dict, str], List[str] | None],
     create_category_folder: Callable[[List[str]], str],
     save_paper_metadata: Callable[[str, Any], None],
-    reading_list_file: str,
-    reading_list_temp_dir: str,
+    reading_list_file: str = "",  # Deprecated, kept for backward compat
+    reading_list_temp_dir: str = "",
     agentic_settings_file: str = None,
 ) -> None:
     """
@@ -66,6 +67,7 @@ def register_daily_arxiv_routes(
                         paper, category_id=category_id, category_path=category_path
                     )
                     save_paper_metadata(file_path, paper)
+                    dal.update_paper_shared(paper_id, {"bibtex": bibtex})
                     print(f"[Backstage BibTeX] ✅ BibTeX updated: {paper_id}")
                 else:
                     print(f"[Backstage BibTeX] ❌ Paper not found: {paper_id}")
@@ -467,26 +469,9 @@ def register_daily_arxiv_routes(
 
                     # If using temp Table of contents, add to to-read list
                     if use_temp_dir:
-                        try:
-                            # Load to-read list
-                            with open(reading_list_file, "r", encoding="utf-8") as f:
-                                reading_list_data = json.load(f)
-                            paper_ids = reading_list_data.get("papers", [])
-
-                            # If the paper ID Not in the list, add it
-                            if existing_paper.id not in paper_ids:
-                                paper_ids.append(existing_paper.id)
-                                with open(
-                                    reading_list_file, "w", encoding="utf-8"
-                                ) as f:
-                                    json.dump(
-                                        {"papers": paper_ids},
-                                        f,
-                                        ensure_ascii=False,
-                                        indent=2,
-                                    )
-                        except Exception as e:
-                            print(f"Failed to add to to-read list: {e}")
+                        user_id = getattr(g, "user_id", 0)
+                        if user_id:
+                            dal.add_to_reading_list(user_id, existing_paper.id)
 
                     return jsonify(
                         {
@@ -549,23 +534,36 @@ def register_daily_arxiv_routes(
                 category_path=category_path,
             )
 
-            # If using temp Table of contents, add to to-read list
-            if use_temp_dir:
-                try:
-                    # Load to-read list
-                    with open(reading_list_file, "r", encoding="utf-8") as f:
-                        reading_list_data = json.load(f)
-                    paper_ids = reading_list_data.get("papers", [])
+            # Dual-write: insert into papers + link user
+            user_id = getattr(g, "user_id", 0)
+            import hashlib
+            with open(target_path, "rb") as fh:
+                content_hash = hashlib.sha256(fh.read()).hexdigest()
 
-                    # If the paper ID Not in the list, add it
-                    if paper.id not in paper_ids:
-                        paper_ids.append(paper.id)
-                        with open(reading_list_file, "w", encoding="utf-8") as f:
-                            json.dump(
-                                {"papers": paper_ids}, f, ensure_ascii=False, indent=2
-                            )
-                except Exception as e:
-                    print(f"Failed to add to to-read list: {e}")
+            dal.insert_paper(paper.id, {
+                "content_hash": content_hash,
+                "title": paper.title,
+                "authors": paper.authors,
+                "abstract": paper.abstract,
+                "arxiv_id": arxiv_id,
+                "arxiv_url": paper.arxiv_url,
+                "arxiv_published_date": paper.arxiv_published_date,
+                "github": paper.github,
+                "homepage": paper.homepage,
+                "pdf_storage_path": target_path,
+                "original_filename": pdf_filename,
+                "uploaded_by": user_id,
+            })
+            if user_id:
+                dal.link_user_paper(
+                    user_id, paper.id,
+                    category_id=category_id,
+                    upload_source="daily_arxiv",
+                )
+
+            # If using temp Table of contents, add to to-read list
+            if use_temp_dir and user_id:
+                dal.add_to_reading_list(user_id, paper.id)
 
             # 【Background acquisition BibTeX(priority DBLP, use after failure arXiv）】
             if paper.title:
