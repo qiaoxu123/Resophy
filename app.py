@@ -6,8 +6,11 @@ from datetime import datetime
 from functools import partial
 from typing import Optional
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, g, jsonify, redirect, render_template, request
 
+from resophy.auth import verify_token
+from resophy.config import load_config
+from resophy.db import close_db, ensure_schema, init_db
 from resophy.core.base_paper import Paper
 from resophy.core.paper_store import paper_store
 from resophy.core.search_index import SearchIndex
@@ -27,6 +30,7 @@ from resophy.routes.basic_routes.institution_mapping_route import (
 from resophy.routes.basic_routes.paper_operation_route import (
     register_paper_operation_routes,
 )
+from resophy.routes.basic_routes.auth_route import register_auth_routes
 from resophy.routes.basic_routes.search_route import register_search_routes
 from resophy.routes.basic_routes.settings_route import register_settings_routes
 from resophy.routes.basic_routes.update_from_url_route import (
@@ -57,6 +61,57 @@ parser.add_argument("--debug", action="store_true", help="Enable debug mode")
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max file size
+
+# Application config (loaded at startup in __main__)
+_app_config = None
+
+
+# ---------------------------------------------------------------------------
+# Authentication middleware
+# ---------------------------------------------------------------------------
+# Paths that do NOT require authentication
+_AUTH_WHITELIST = frozenset((
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/check",
+))
+
+
+@app.before_request
+def _require_auth():
+    """Enforce JWT authentication on all /api/* routes except auth endpoints."""
+    if _app_config is None:
+        # Auth not initialised yet (e.g. during startup)
+        return
+
+    path = request.path
+
+    # Static files, login page, and non-API pages are public
+    if not path.startswith("/api/"):
+        return
+
+    # Auth endpoints are public
+    if path in _AUTH_WHITELIST:
+        return
+
+    # Extract token from Authorization header or query parameter
+    token = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = request.args.get("token")
+
+    if not token:
+        return jsonify({"error": "Authentication required"}), 401
+
+    payload = verify_token(token, _app_config)
+    if payload is None:
+        return jsonify({"error": "Invalid or expired token"}), 401
+
+    # Store user info on g for downstream handlers
+    g.user_id = payload.get("user_id", int(payload["sub"]))
+    g.username = payload.get("username", "")
 
 # Configuration file storage path (will be set in main function according to parameters)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -354,17 +409,19 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/login")
+def login_page():
+    return render_template("login.html")
+
+
 def register_routes():
     """Register all routes (must be called after init_app)"""
+    register_auth_routes(app, cfg=_app_config)
+
     register_category_routes(
         app,
-        get_categories=get_categories,
-        save_categories=save_categories,
-        find_category_node=find_category_node,
         get_category_path=get_category_path,
         get_papers_in_category=get_papers_in_category,
-        add_pdf_counts_to_categories=add_pdf_counts_to_categories,
-        get_category_pdf_count=get_category_pdf_count,
         paper_store=paper_store,
         upload_folder=UPLOAD_FOLDER,
     )
@@ -438,7 +495,6 @@ def register_routes():
         get_category_path=get_category_path,
         create_category_folder=create_category_folder,
         save_paper_metadata=save_paper_metadata,
-        reading_list_file=READING_LIST_FILE,
         reading_list_temp_dir=READING_LIST_TEMP_DIR,
         agentic_settings_file=AGENTIC_SETTINGS_FILE,
     )
@@ -466,7 +522,6 @@ def register_routes():
         delete_paper_files=delete_paper_files,
         extract_pdf_metadata=None,  # No longer needed, use new upload_paper module
         search_arxiv_by_title=None,  # No longer needed, use new upload_paper module
-        reading_list_file=READING_LIST_FILE,
         upload_folder=UPLOAD_FOLDER,
         paper_store=paper_store,
     )
@@ -477,7 +532,6 @@ def register_routes():
         get_category_path=get_category_path,
         create_category_folder=create_category_folder,
         save_paper_metadata=save_paper_metadata,
-        reading_list_file=READING_LIST_FILE,
         paper_store=paper_store,
     )
 
@@ -487,7 +541,6 @@ def register_routes():
         get_category_path=get_category_path,
         create_category_folder=create_category_folder,
         save_paper_metadata=save_paper_metadata,
-        reading_list_file=READING_LIST_FILE,
         reading_list_temp_dir=READING_LIST_TEMP_DIR,
         paper_store=paper_store,
     )
@@ -521,7 +574,6 @@ def register_routes():
         get_category_path=get_category_path,
         create_category_folder=create_category_folder,
         save_paper_metadata=save_paper_metadata,
-        reading_list_file=READING_LIST_FILE,
         paper_store=paper_store,
         upload_folder=UPLOAD_FOLDER,
     )
@@ -562,6 +614,13 @@ def analysis_viewer(paper_id):
 if __name__ == "__main__":
     # Parse command line arguments
     args = parser.parse_args()
+
+    # Load centralized config (env vars / .env)
+    _app_config = load_config()
+
+    # Initialize database connection pools & schema
+    init_db(_app_config)
+    ensure_schema()
 
     # Initialize application (configure paper directory etc.)
     init_app(papers_dir=args.papers_dir)
@@ -634,6 +693,10 @@ if __name__ == "__main__":
     def get_papers_dir():
         """Get absolute path of papers directory"""
         return jsonify({"success": True, "path": os.path.abspath(UPLOAD_FOLDER)})
+
+    # Ensure DB pools are closed on exit
+    import atexit
+    atexit.register(close_db)
 
     # Paper data is now directly stored in the JSON file next to the PDF file
     print(f"Start server: http://{args.host}:{args.port}")
