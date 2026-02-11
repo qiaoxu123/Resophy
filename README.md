@@ -106,45 +106,24 @@ Resophy is a fully open-source, Vibe Coding-oriented modern paper reader that he
 <div align=center>
   <img src="https://github.com/user-attachments/assets/73d25cfa-5791-4b54-a131-d816f51afebb">
   <div style="margin-top:8px; color: #555; font-size: 16px;">
-    Resophy adopts a frontend-backend separated architecture
+    Resophy is deployed as a Docker-based server with multi-user support
   </div>
 </div>
 
 
-1. **Main Service (Resophy Core)**: HTML + JavaScript + Python Flask backend service, providing core features such as paper management, classification, and search
-2. **AI Services** include:
-   - **LLM Server**: LLM inference service for AI translation, interpretation, and arXiv paper analysis (optional, supports local deployment or remote API)
-   - **MinerU Server**: Document parsing service for PDF to Markdown parsing (optional, for AI features)
+1. **Resophy Server**: Docker-based multi-user service with MySQL storage and Flarum authentication, providing core features such as paper management, classification, and search
+2. **AI Services** (optional):
+   - **LLM Server**: LLM inference service for AI translation, interpretation, and arXiv paper analysis (supports local deployment or remote API)
+   - **MinerU Server**: Document parsing service for PDF to Markdown parsing
 
-Resophy supports two deployment modes:
+| Requirements | |
+|---|---|
+| Docker & Docker Compose | Required |
+| MySQL 8.4 | Required (e.g. 1Panel managed) |
+| Flarum | Required (user authentication) |
+| GPU Server | Optional (for AI features) |
 
-| Mode | Best For | Requirements |
-|------|----------|-------------|
-| **Local (Single-User)** | Personal use, quick start | Python 3.10+, uv |
-| **Docker (Multi-User)** | Team/server deployment | Docker, MySQL 8.4, Flarum |
-
-For installation and configuration instructions, please refer to:
-
-<div align="center">
-  <table>
-    <thead>
-      <tr>
-        <th>System</th>
-        <th>Documentation</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>Windows / Mac / Linux (Local)</td>
-        <td><a href="docs/installation_en.md">Installation Guide</a></td>
-      </tr>
-      <tr>
-        <td>Docker (Multi-User)</td>
-        <td><a href="docs/installation_en.md#3-docker-deployment-multi-user">Docker Deployment Guide</a></td>
-      </tr>
-    </tbody>
-  </table>
-</div>
+For installation and configuration instructions, please refer to the <a href="docs/installation_en.md">Installation Guide</a>.
 
 ---- 
 
