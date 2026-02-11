@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Resophy</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='images/website_logo.png') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+            padding: 48px 40px;
+            width: 100%;
+            max-width: 400px;
+        }
+        .login-header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+        .login-header img {
+            height: 48px;
+            margin-bottom: 16px;
+        }
+        .login-header h1 {
+            font-size: 22px;
+            font-weight: 600;
+            color: #333;
+        }
+        .login-header p {
+            font-size: 14px;
+            color: #888;
+            margin-top: 6px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            color: #555;
+            margin-bottom: 6px;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.2s;
+            outline: none;
+        }
+        .form-group input:focus {
+            border-color: #4a90d9;
+            box-shadow: 0 0 0 3px rgba(74, 144, 217, 0.1);
+        }
+        .login-btn {
+            width: 100%;
+            padding: 12px;
+            background: #4a90d9;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .login-btn:hover { background: #3a7bc8; }
+        .login-btn:disabled {
+            background: #b0c4de;
+            cursor: not-allowed;
+        }
+        .error-msg {
+            color: #e74c3c;
+            font-size: 13px;
+            text-align: center;
+            margin-bottom: 16px;
+            min-height: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-header">
+            <img src="{{ url_for('static', filename='images/hompage_logo.png') }}" alt="Resophy">
+            <h1>Resophy</h1>
+            <p>Agentic Paper Reading</p>
+        </div>
+
+        <div class="error-msg" id="error-msg"></div>
+
+        <form id="login-form">
+            <div class="form-group">
+                <label for="identification">Username or Email</label>
+                <input type="text" id="identification" name="identification" autocomplete="username" required autofocus>
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" autocomplete="current-password" required>
+            </div>
+            <button type="submit" class="login-btn" id="login-btn">
+                <i class="fas fa-sign-in-alt"></i> Login
+            </button>
+        </form>
+    </div>
+
+    <script>
+        // If already authenticated, redirect to main page
+        (function checkExistingToken() {
+            const token = localStorage.getItem('resophy_token');
+            if (token) {
+                fetch('/api/auth/check', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.authenticated) {
+                        window.location.href = '/';
+                    }
+                })
+                .catch(() => {});
+            }
+        })();
+
+        document.getElementById('login-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const btn = document.getElementById('login-btn');
+            const errorEl = document.getElementById('error-msg');
+            errorEl.textContent = '';
+
+            const identification = document.getElementById('identification').value.trim();
+            const password = document.getElementById('password').value;
+
+            if (!identification || !password) {
+                errorEl.textContent = 'Please enter username and password';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Logging in...';
+
+            try {
+                const resp = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ identification, password })
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    localStorage.setItem('resophy_token', data.token);
+                    localStorage.setItem('resophy_user', JSON.stringify(data.user));
+                    window.location.href = '/';
+                } else {
+                    errorEl.textContent = data.error || 'Login failed';
+                }
+            } catch (err) {
+                errorEl.textContent = 'Network error, please try again';
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Login';
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,3 +1,33 @@
+// ---------------------------------------------------------------------------
+// Auth: wrap fetch to auto-attach JWT and handle 401
+// ---------------------------------------------------------------------------
+const _originalFetch = window.fetch;
+window.fetch = function(url, options = {}) {
+    const token = localStorage.getItem('resophy_token');
+    if (token) {
+        options.headers = options.headers || {};
+        // Support both Headers object and plain object
+        if (options.headers instanceof Headers) {
+            if (!options.headers.has('Authorization')) {
+                options.headers.set('Authorization', 'Bearer ' + token);
+            }
+        } else {
+            if (!options.headers['Authorization']) {
+                options.headers['Authorization'] = 'Bearer ' + token;
+            }
+        }
+    }
+    return _originalFetch.call(this, url, options).then(response => {
+        // If any API call returns 401, redirect to login
+        if (response.status === 401 && typeof url === 'string' && url.startsWith('/api/') && !url.startsWith('/api/auth/')) {
+            localStorage.removeItem('resophy_token');
+            localStorage.removeItem('resophy_user');
+            window.location.href = '/login';
+        }
+        return response;
+    });
+};
+
 // Global state
 let categories = {};
 let currentCategoryId = null;
