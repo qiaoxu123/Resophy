@@ -1,0 +1,41 @@
+services:
+  resophy:
+    build: .
+    container_name: 1Panel-resophy
+    restart: unless-stopped
+    ports:
+      - "7191:7191"
+    volumes:
+      - ./papers_storage:/app/papers_storage
+    environment:
+      # --- Database (reuse 1panel MySQL) ---
+      - DB_HOST=1Panel-mysql-c3Jl
+      - DB_PORT=3306
+      - DB_NAME=resophy
+      - DB_USER=${DB_USER:-resophy}
+      - DB_PASSWORD=${DB_PASSWORD}
+
+      # --- Flarum auth (reuse 1panel Flarum) ---
+      - FLARUM_DB_HOST=1Panel-mysql-c3Jl
+      - FLARUM_DB_PORT=3306
+      - FLARUM_DB_NAME=${FLARUM_DB_NAME:-flarum_kyrfa5}
+      - FLARUM_DB_USER=${FLARUM_DB_USER:-flarum_2jESjY}
+      - FLARUM_DB_PASSWORD=${FLARUM_DB_PASSWORD}
+      - FLARUM_DB_PREFIX=${FLARUM_DB_PREFIX:-flarum_}
+      - FLARUM_API_URL=${FLARUM_API_URL:-http://1Panel-flarum-ukk3:8000}
+
+      # --- Redis (optional, for session cache) ---
+      - REDIS_URL=${REDIS_URL:-redis://1Panel-redis-R2Qu:6379/1}
+
+      # --- App ---
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - RESOPHY_PORT=7191
+      - PAPERS_DIR=/app/papers_storage
+      - TZ=Asia/Shanghai
+    networks:
+      - 1panel-network
+    depends_on: []  # MySQL/Redis managed externally by 1panel
+
+networks:
+  1panel-network:
+    external: true
