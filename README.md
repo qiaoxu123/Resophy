@@ -115,8 +115,15 @@ Resophy is a fully open-source, Vibe Coding-oriented modern paper reader that he
 2. **AI Services** include:
    - **LLM Server**: LLM inference service for AI translation, interpretation, and arXiv paper analysis (optional, supports local deployment or remote API)
    - **MinerU Server**: Document parsing service for PDF to Markdown parsing (optional, for AI features)
-  
-Resophy uses `uv` for dependency management and supports separated deployment architecture. You can deploy Resophy main service and AI servers on different machines. For installation and configuration instructions, please refer to:
+
+Resophy supports two deployment modes:
+
+| Mode | Best For | Requirements |
+|------|----------|-------------|
+| **Local (Single-User)** | Personal use, quick start | Python 3.10+, uv |
+| **Docker (Multi-User)** | Team/server deployment | Docker, MySQL 8.4, Flarum |
+
+For installation and configuration instructions, please refer to:
 
 <div align="center">
   <table>
@@ -128,8 +135,12 @@ Resophy uses `uv` for dependency management and supports separated deployment ar
     </thead>
     <tbody>
       <tr>
-        <td>Windows / Mac / Linux</td>
+        <td>Windows / Mac / Linux (Local)</td>
         <td><a href="docs/installation_en.md">Installation Guide</a></td>
+      </tr>
+      <tr>
+        <td>Docker (Multi-User)</td>
+        <td><a href="docs/installation_en.md#3-docker-deployment-multi-user">Docker Deployment Guide</a></td>
       </tr>
     </tbody>
   </table>
@@ -425,6 +436,10 @@ Understanding the project structure helps you better describe your needs. Resoph
 Resophy/
 ├── app.py                    # Flask application entry, route registration
 ├── resophy/
+│   ├── config.py             # Centralized env-based configuration
+│   ├── db.py                 # MySQL connection pools & schema migration
+│   ├── auth.py               # Flarum authentication (JWT + bcrypt)
+│   ├── dal.py                # Data access layer (MySQL CRUD)
 │   ├── core/                 # Core data models
 │   │   ├── base_paper.py     # Paper data model
 │   │   ├── paper_store.py    # Paper storage management
@@ -432,18 +447,24 @@ Resophy/
 │   ├── routes/               # Route handlers
 │   │   ├── basic_routes/     # Basic feature routes (paper operations, categories, search, etc.)
 │   │   └── agent_routes/     # AI feature routes (translation, interpretation)
-│   └── tools/                 # Utility functions
+│   └── tools/                # Utility functions
 │       ├── basic_tools/      # Basic tools (arXiv, PDF processing, category management, etc.)
 │       └── agent_tools/      # AI tools (translation, interpretation)
-├── templates/                 # HTML templates
-│   ├── index.html           # Main interface
-│   ├── pdf_viewer.html      # PDF reader
-│   └── analysis_viewer.html # AI interpretation viewer
+├── deploy/
+│   └── init.sql              # MySQL schema (auto-applied on startup)
+├── templates/                # HTML templates
+│   ├── index.html            # Main interface
+│   ├── login.html            # Login page (multi-user mode)
+│   ├── pdf_viewer.html       # PDF reader
+│   └── analysis_viewer.html  # AI interpretation viewer
 ├── static/
 │   ├── css/
-│   │   └── style.css        # Style file
+│   │   └── style.css         # Style file
 │   └── js/
-│       └── app.js           # Frontend JavaScript
+│       └── app.js            # Frontend JavaScript
+├── Dockerfile                # Multi-stage Docker build
+├── docker-compose.yml        # Docker Compose for 1panel integration
+├── .env.example              # Environment variable template
 └── papers/                   # Paper storage directory (user data)
 ```
 

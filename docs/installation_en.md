@@ -14,14 +14,26 @@
     - [1.1. Local End (Resophy Core - Main Service)](#11-local-end-resophy-core---main-service)
     - [1.2. AI End (Optional - AI Server)](#12-ai-end-optional---ai-server)
   - [2. Install Resophy Local End](#2-install-resophy-local-end)
-  - [3. Install Resophy AI End (Optional)](#3-install-resophy-ai-end-optional)
-    - [3.1 Deploy MinerU](#31-deploy-mineru)
-    - [3.2 Configure LLM Server](#32-configure-llm-server)
+  - [3. Docker Deployment (Multi-User)](#3-docker-deployment-multi-user)
+    - [3.1 Prerequisites](#31-prerequisites)
+    - [3.2 Configuration](#32-configuration)
+    - [3.3 Build and Run](#33-build-and-run)
+    - [3.4 Initialize Database](#34-initialize-database)
+  - [4. Install Resophy AI End (Optional)](#4-install-resophy-ai-end-optional)
+    - [4.1 Deploy MinerU](#41-deploy-mineru)
+    - [4.2 Configure LLM Server](#42-configure-llm-server)
 
 
 #### 1. Resophy Architecture Overview
 
-Resophy adopts a **dual-end separated architecture**, consisting of two independent deployment ends:
+Resophy supports two deployment modes:
+
+| Mode | Best For | Requirements |
+|------|----------|-------------|
+| **Local (Single-User)** | Personal use, quick start | Python 3.10+, uv |
+| **Docker (Multi-User)** | Team/server deployment | Docker, MySQL 8.4, Flarum |
+
+Both modes share the same AI end (optional).
 
 #### 1.1. Local End (Resophy Core - Main Service)
 
@@ -133,9 +145,91 @@ After the service starts, you can access the Resophy interface by visiting `http
 > - Deploy an AI server on another machine (see section 1.2), or
 > - Use remote AI API services (such as OpenAI, DeepSeek, etc.), and configure the API address and key in Resophy settings
 
-### 3. Install Resophy AI End (Optional)
+### 3. Docker Deployment (Multi-User)
 
-> **Important Note**: AI servers can be deployed on different machines from the Resophy main service. The Resophy main service only needs the API addresses of these AI servers to use AI features. You can deploy AI servers on machines with GPUs according to your resources, while the Resophy main service can be deployed on any machine.
+Docker mode enables **multi-user support** with MySQL persistent storage and Flarum-based user authentication. This is recommended for team or server deployments.
+
+#### 3.1 Prerequisites
+
+The Docker deployment is designed to run within an existing infrastructure that includes:
+
+- **Docker & Docker Compose** installed
+- **MySQL 8.4** (e.g. managed by 1Panel or standalone)
+- **Flarum** forum instance (provides user accounts and authentication)
+- A shared Docker network connecting all services (default: `1panel-network`)
+
+> **Note**: MySQL and Flarum are expected to be running as separate containers or services. Resophy connects to them over the shared Docker network.
+
+#### 3.2 Configuration
+
+1. Copy the environment template and fill in your values:
+
+```bash
+cp .env.example .env
+```
+
+2. Edit `.env` with your actual credentials:
+
+```bash
+# --- Resophy MySQL Database ---
+DB_HOST=your-mysql-container-name    # e.g. 1Panel-mysql-c3Jl
+DB_PORT=3306
+DB_NAME=resophy
+DB_USER=resophy
+DB_PASSWORD=your_secure_password
+
+# --- Flarum Database (read-only, for authentication) ---
+FLARUM_DB_HOST=your-mysql-container-name
+FLARUM_DB_NAME=your_flarum_db_name
+FLARUM_DB_USER=your_flarum_db_user
+FLARUM_DB_PASSWORD=your_flarum_db_password
+FLARUM_DB_PREFIX=flarum_
+FLARUM_API_URL=http://your-flarum-container:8000
+
+# --- App ---
+SECRET_KEY=generate-a-random-string-here
+```
+
+3. Update `docker-compose.yml` if your container names or network differ from the defaults.
+
+#### 3.3 Build and Run
+
+```bash
+# Build and start (foreground, to see logs)
+docker compose up --build
+
+# Or run in detached mode
+docker compose up --build -d
+
+# View logs
+docker compose logs -f resophy
+
+# Stop
+docker compose down
+```
+
+The service will be available at `http://localhost:7191`.
+
+#### 3.4 Initialize Database
+
+The database schema is **automatically created** on first startup. Resophy runs `deploy/init.sql` to create all required tables (`papers`, `user_papers`, `user_categories`, `user_settings`, `user_reading_history`, `user_reading_list`) if they don't already exist.
+
+**Before first use**, create the `resophy` database in your MySQL instance:
+
+```sql
+CREATE DATABASE IF NOT EXISTS resophy CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'resophy'@'%' IDENTIFIED BY 'your_secure_password';
+GRANT ALL PRIVILEGES ON resophy.* TO 'resophy'@'%';
+FLUSH PRIVILEGES;
+```
+
+**User accounts**: Users log in with their **Flarum forum credentials**. Resophy reads the Flarum users table (read-only) for authentication. No separate user registration is needed.
+
+---
+
+### 4. Install Resophy AI End (Optional)
+
+> **Important Note**: AI servers can be deployed on different machines from the Resophy main service (both local and Docker modes). The Resophy main service only needs the API addresses of these AI servers to use AI features. You can deploy AI servers on machines with GPUs according to your resources, while the Resophy main service can be deployed on any machine.
 
 
 On the machine where you need to deploy MinerU and LLM servers (recommended: machines with GPU), install the server end version:
@@ -204,7 +298,7 @@ Resophy's AI features (**AI Translation**, **AI Interpretation**, **Daily arXiv*
 
 The following are detailed deployment steps:
 
-#### 3.1 Deploy MinerU
+#### 4.1 Deploy MinerU
 
 MinerU is used to parse PDF documents into structured Markdown format and is the foundation of the AI interpretation feature.
 
@@ -262,7 +356,7 @@ MinerU will start an API server at `http://0.0.0.0:6001` for parsing PDFs into M
 
 > **Note**: MinerU server requires GPU support. If using CPU inference, please refer to the [MinerU official documentation](https://github.com/opendatalab/MinerU?tab=readme-ov-file#local-deployment) for configuration.
 
-#### 3.2 Configure LLM Server
+#### 4.2 Configure LLM Server
 
 Resophy's AI features require access to LLM API. You can use one of the following two methods:
 
