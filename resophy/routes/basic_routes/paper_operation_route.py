@@ -8,8 +8,9 @@ import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Tuple
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, g, jsonify, request, send_file
 
+from resophy import dal
 from resophy.core.base_paper import Paper
 from resophy.core.paper_store import PaperStore
 from resophy.tools.basic_tools.paper_repository import scan_papers_in_directory
@@ -60,14 +61,6 @@ class DeletePaperFilesFn(Protocol):
     def __call__(self, pdf_path: str) -> None: ...
 
 
-class AddToReadingListFn(Protocol):
-    def __call__(self, paper_id: str) -> None: ...
-
-
-class RemoveFromReadingListFn(Protocol):
-    def __call__(self, paper_id: str) -> None: ...
-
-
 def register_paper_operation_routes(
     app: Flask,
     *,
@@ -79,43 +72,12 @@ def register_paper_operation_routes(
     save_paper_metadata: SavePaperMetadataFn,
     get_paper_json_path: GetPaperJsonPathFn,
     delete_paper_files: DeletePaperFilesFn,
-    extract_pdf_metadata: Optional[Any],  # No longer used, reserved for compatibility
-    search_arxiv_by_title: Optional[Any],  # No longer used, reserved for compatibility
-    reading_list_file: str,
+    extract_pdf_metadata: Optional[Any] = None,  # No longer used, reserved for compatibility
+    search_arxiv_by_title: Optional[Any] = None,  # No longer used, reserved for compatibility
+    reading_list_file: str = "",  # Deprecated, kept for backward compat
     upload_folder: str,
     paper_store: PaperStore,
 ) -> None:
-
-    def load_reading_list() -> List[str]:
-        try:
-            with open(reading_list_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("papers", [])
-        except Exception as exc:  # noqa: BLE001
-            print(f"Failed to read to-be-read list: {exc}")
-            return []
-
-    def save_reading_list(paper_ids: List[str]) -> None:
-        try:
-            with open(reading_list_file, "w", encoding="utf-8") as f:
-                json.dump({"papers": paper_ids}, f, ensure_ascii=False, indent=2)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Failed to save to-read list: {exc}")
-
-    def add_to_reading_list(paper_id: str) -> None:
-        paper_ids = load_reading_list()
-        if paper_id not in paper_ids:
-            paper_ids.append(paper_id)
-            save_reading_list(paper_ids)
-
-    def remove_from_reading_list(paper_id: str) -> None:
-        paper_ids = load_reading_list()
-        if paper_id in paper_ids:
-            paper_ids.remove(paper_id)
-            save_reading_list(paper_ids)
-
-    def is_in_reading_list(paper_id: str) -> bool:
-        return paper_id in load_reading_list()
 
     def find_paper(paper_id: str) -> Optional[Tuple[Paper, List[str], str]]:
         entry = paper_store.get_entry(paper_id)
@@ -386,6 +348,10 @@ def register_paper_operation_routes(
             # Save updated metadata and update search index (with the new category)
             save_paper_metadata(target_file_path, paper_obj)
 
+            # Dual-write: update user_papers.category_id in DB
+            dal.update_user_paper(g.user_id, paper_id, {"category_id": target_category_id})
+            dal.update_paper_shared(paper_id, {"pdf_storage_path": target_file_path})
+
             return jsonify(
                 {
                     "success": True,
@@ -446,8 +412,17 @@ def register_paper_operation_routes(
                 return jsonify({"error": "Paper not found"}), 404
 
             paper, _, category_id = result
-            if paper.file_path:
-                delete_paper_files(paper.file_path)
+
+            # Remove user association first
+            dal.unlink_user_paper(g.user_id, paper_id)
+
+            # If no other users reference this paper, delete files + shared row
+            remaining = dal.count_paper_users(paper_id)
+            if remaining == 0:
+                if paper.file_path:
+                    delete_paper_files(paper.file_path)
+                dal.delete_paper(paper_id)
+
             paper_store.remove(paper_id)
 
             return jsonify(
@@ -488,6 +463,23 @@ def register_paper_operation_routes(
 
             if paper.file_path:
                 save_paper_metadata(paper.file_path, paper)
+
+            # Dual-write: update DB
+            # Shared fields → papers table
+            shared_fields = {k: v for k, v in data.items()
+                            if k in ("title", "authors", "abstract", "year",
+                                     "journal", "affiliation", "keywords",
+                                     "subject", "summary", "bibtex",
+                                     "arxiv_id", "arxiv_url", "github", "homepage")}
+            if shared_fields:
+                dal.update_paper_shared(paper_id, shared_fields)
+
+            # Per-user fields → user_papers table
+            user_fields = {k: v for k, v in data.items()
+                          if k in ("notes", "starred", "use_chinese_version",
+                                   "useChinese", "useChineseVersion")}
+            if user_fields:
+                dal.update_user_paper(g.user_id, paper_id, user_fields)
 
             # If the user modified title, automatically re-crawl in the background
             if title_changed and new_title:
@@ -571,30 +563,23 @@ def register_paper_operation_routes(
 
     @app.route("/api/reading-list", methods=["GET"])
     def api_get_reading_list():
-        paper_ids = load_reading_list()
+        user_id = g.user_id
+        paper_ids = dal.get_reading_list(user_id)
 
-        # Auto-sync: scan _ReadingListTemp Table of contents, add papers in the table of contents to the to-read list
+        # Auto-sync: scan _ReadingListTemp directory, add papers to the reading list
         reading_list_temp_path = os.path.join(upload_folder, "_ReadingListTemp")
         if os.path.exists(reading_list_temp_path):
-            # Scan all papers in the directory
             temp_papers = scan_papers_in_directory(
                 reading_list_temp_path,
                 category_id="reading_list_temp",
                 category_path=["Root", "_ReadingListTemp"],
             )
 
-            # Will _ReadingListTemp Papers in the table of contents are added to the to-read list (if they are not already there)
-            updated = False
             for paper in temp_papers:
                 if paper.id not in paper_ids:
+                    dal.add_to_reading_list(user_id, paper.id)
                     paper_ids.append(paper.id)
-                    updated = True
 
-            # If there are updates, save the to-read list
-            if updated:
-                save_reading_list(paper_ids)
-
-        # Return all to-read list papers (no more limited number)
         papers = collect_papers_by_ids(paper_ids)
         return jsonify([paper.to_dict() for paper in papers])
 
@@ -604,12 +589,14 @@ def register_paper_operation_routes(
         if not result:
             return jsonify({"success": False, "error": "Paper not found"}), 404
 
-        add_to_reading_list(paper_id)
+        dal.add_to_reading_list(g.user_id, paper_id)
         return jsonify({"success": True})
 
     @app.route("/api/reading-list/<paper_id>/remove", methods=["POST"])
     def api_remove_from_reading_list(paper_id: str):
-        if not is_in_reading_list(paper_id):
+        user_id = g.user_id
+        reading_list = dal.get_reading_list(user_id)
+        if paper_id not in reading_list:
             return (
                 jsonify({"success": False, "error": "Paper not in reading list"}),
                 404,
@@ -623,9 +610,6 @@ def register_paper_operation_routes(
         paper, category_path, category_id = result
 
         # Check if it is still in the temporary directory used by the reading list.
-        # We require BOTH the category information and the actual file path to match
-        # the temp directory, to avoid accidentally deleting papers that have already
-        # been moved into a normal category.
         temp_dir = os.path.join(upload_folder, "_ReadingListTemp")
         is_temp_category = (
             category_id == "reading_list_temp"
@@ -645,7 +629,7 @@ def register_paper_operation_routes(
         data = request.json or {}
         delete_files = data.get("delete_files", False)
 
-        # If it is in the temporary directory, the user is required to confirm the deletion of the file (regardless of the source)
+        # If it is in the temporary directory, the user is required to confirm the deletion
         if is_in_temp and not delete_files:
             return (
                 jsonify(
@@ -657,34 +641,25 @@ def register_paper_operation_routes(
                     }
                 ),
                 200,
-            )  # return 200 for front-end processing
+            )
 
         # If file deletion is confirmed, delete the paper and its related files
-        # As long as temp Delete files from directory
         if delete_files and is_in_temp and paper.file_path:
             delete_paper_files(paper.file_path)
             paper_store.remove(paper_id)
         elif not is_in_temp:
-            # if not temp Directory, only removed from the to-read list, files are not deleted
-            # The paper remains in its original catalog
             pass
 
-        # Remove from to-read list
-        remove_from_reading_list(paper_id)
+        # Remove from reading list via DAL
+        dal.remove_from_reading_list(user_id, paper_id)
 
-        # Returns whether the file was deleted (the file is only deleted when it is in the temporary directory and the user confirms the deletion)
         return jsonify({"success": True, "deleted_files": delete_files and is_in_temp})
 
     @app.route("/api/paper/<paper_id>/read-time", methods=["POST"])
     def api_record_read_time(paper_id: str):
         """Record paper reading time (cumulative increment)"""
         try:
-            import json as json_lib
-            import os
-            from datetime import datetime
-
             data = request.json or {}
-            # Use incremental mode
             increment = data.get("increment", 0)
 
             if not isinstance(increment, (int, float)) or increment <= 0:
@@ -696,61 +671,21 @@ def register_paper_operation_routes(
 
             paper, category_path, category_id = result
 
-            # Cumulative reading time increment
+            # Cumulative reading time increment on paper object
             paper.record_read_time(int(increment))
 
-            # save to file
+            # Save to file
             if paper.file_path:
                 save_paper_metadata(paper.file_path, paper)
 
-            # Update reading history and record papers at the same timeIDand date
-            reading_history_file = os.path.join(upload_folder, "reading_history.json")
+            # Dual-write: update user_papers.read_time in DB
+            dal.increment_user_paper_time(g.user_id, paper_id, "read_time", int(increment))
 
-            if os.path.exists(reading_history_file):
-                try:
-                    with open(reading_history_file, "r", encoding="utf-8") as fp:
-                        history = json_lib.load(fp)
-                except:
-                    history = {}
-
-                # Get today's date
-                today = datetime.now().strftime("%Y-%m-%d")
-                minutes = int(increment / 60)  # Convert to minutes
-
-                # Update reading history structure
-                # new format: { "date": { "total": minutes, "papers": ["paper_id1", "paper_id2"] } }
-                # Compatible with older formats: { "date": minutes }
-                if today in history:
-                    if isinstance(history[today], dict):
-                        # new format
-                        history[today]["total"] = (
-                            history[today].get("total", 0) + minutes
-                        )
-                        if paper_id not in history[today].get("papers", []):
-                            if "papers" not in history[today]:
-                                history[today]["papers"] = []
-                            history[today]["papers"].append(paper_id)
-                    else:
-                        # old format, converted to new format
-                        old_minutes = history[today]
-                        history[today] = {
-                            "total": old_minutes + minutes,
-                            "papers": [paper_id],
-                        }
-                else:
-                    history[today] = {"total": minutes, "papers": [paper_id]}
-
-                # Save updated history
-                with open(reading_history_file, "w", encoding="utf-8") as fp:
-                    json_lib.dump(history, fp, ensure_ascii=False, indent=2)
-            else:
-                # If the file does not exist, create a new file
-                today = datetime.now().strftime("%Y-%m-%d")
-                minutes = int(increment / 60)
-                history = {today: {"total": minutes, "papers": [paper_id]}}
-                os.makedirs(os.path.dirname(reading_history_file), exist_ok=True)
-                with open(reading_history_file, "w", encoding="utf-8") as fp:
-                    json_lib.dump(history, fp, ensure_ascii=False, indent=2)
+            # Update reading history via DAL
+            today = datetime.now().strftime("%Y-%m-%d")
+            minutes = int(increment / 60)
+            if minutes > 0:
+                dal.record_reading(g.user_id, today, minutes, paper_id)
 
             return jsonify({"success": True, "read_time": paper.read_time})
 
@@ -781,6 +716,9 @@ def register_paper_operation_routes(
             # save to file
             if paper.file_path:
                 save_paper_metadata(paper.file_path, paper)
+
+            # Dual-write: update user_papers.analysis_view_time in DB
+            dal.increment_user_paper_time(g.user_id, paper_id, "analysis_view_time", int(increment))
 
             return jsonify(
                 {"success": True, "analysis_view_time": paper.analysis_view_time}
