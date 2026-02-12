@@ -31,10 +31,17 @@ def register_settings_routes(
 
         if request.method == "GET":
             settings = dal.get_user_settings(user_id)
+            # Check if user has an avatar file on disk
+            avatar_filename = None
+            for ext in ("jpg", "png", "gif"):
+                candidate = f"avatar_{user_id}.{ext}"
+                if os.path.exists(os.path.join(avatars_dir, candidate)):
+                    avatar_filename = candidate
+                    break
             # Map DB column names to camelCase for frontend
             return jsonify({
                 "name": g.username or "Paper Reader",
-                "avatar": None,
+                "avatar": avatar_filename,
                 "heatmapColorScheme": settings.get("heatmap_color_scheme", "green"),
                 "onboardingDontShow": bool(settings.get("onboarding_done", False)),
                 "aiLanguage": settings.get("ai_language", "zh"),
@@ -72,6 +79,11 @@ def register_settings_routes(
                 ext = "jpg"
 
             image_data = base64.b64decode(encoded)
+            # Remove old avatar files (different extension)
+            for old_ext in ("jpg", "png", "gif"):
+                old_path = os.path.join(avatars_dir, f"avatar_{user_id}.{old_ext}")
+                if os.path.exists(old_path):
+                    os.remove(old_path)
             # Per-user avatar filename
             filename = f"avatar_{user_id}.{ext}"
             filepath = os.path.join(avatars_dir, filename)

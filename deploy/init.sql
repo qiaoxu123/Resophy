@@ -137,13 +137,13 @@ CREATE TABLE IF NOT EXISTS user_settings (
     onboarding_done     TINYINT(1)    DEFAULT 0,
 
     -- LLM API config (per-user allows different API keys)
-    llm_model           VARCHAR(100)  DEFAULT NULL,
-    llm_base_url        VARCHAR(500)  DEFAULT NULL,
+    llm_model           VARCHAR(100)  DEFAULT 'gemini-2.5-flash',
+    llm_base_url        VARCHAR(500)  DEFAULT 'https://hiapi.online/v1',
     llm_api_key         VARCHAR(500)  DEFAULT NULL,
 
     -- MinerU config
     mineru_server_url   VARCHAR(500)  DEFAULT NULL,
-    mineru_use_api      TINYINT(1)    DEFAULT 0,
+    mineru_use_api      TINYINT(1)    DEFAULT 1,
     mineru_api_token    VARCHAR(500)  DEFAULT NULL,
 
     -- Daily arXiv preferences (stored as JSON for flexibility)

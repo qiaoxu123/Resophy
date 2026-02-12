@@ -139,11 +139,11 @@ DEFAULT_USER_SETTINGS = {
 
 # Default Agentic settings (uniform AI feature configuration)
 DEFAULT_AGENTIC_SETTINGS = {
-    "llmModel": "",  # LLM model name
-    "llmBaseUrl": "",  # LLM API base URL
-    "llmApiKey": "",  # LLM API key
+    "llmModel": "gemini-2.5-flash",  # LLM model name
+    "llmBaseUrl": "https://hiapi.online/v1",  # LLM API base URL
+    "llmApiKey": "",  # LLM API key (user must configure)
     "mineruServerUrl": "",  # PDF parsing service address (for local mode)
-    "mineruUseApi": False,  # Toggle between local CLI mode and cloud API mode
+    "mineruUseApi": True,  # Toggle between local CLI mode and cloud API mode
     "mineruApiToken": "",  # MinerU cloud API token (for API mode)
     # Note: System prompts are now built-in and selected based on user's aiLanguage setting
     # Custom prompts are no longer supported
