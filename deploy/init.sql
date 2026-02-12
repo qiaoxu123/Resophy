@@ -169,3 +169,41 @@ CREATE TABLE IF NOT EXISTS user_reading_list (
     FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='Per-user reading list (to-read queue)';
+
+
+-- ============================================================
+-- Schema migrations: add columns that may be missing on
+-- tables created before these columns were introduced.
+-- Errors (e.g. "Duplicate column name") are caught by
+-- ensure_schema()'s per-statement try/except.
+-- ============================================================
+-- ============================================================
+-- 7. shared_categories - 分类共享关系
+-- ============================================================
+CREATE TABLE IF NOT EXISTS shared_categories (
+    id          BIGINT        AUTO_INCREMENT PRIMARY KEY,
+    category_id VARCHAR(36)   NOT NULL,
+    owner_id    INT UNSIGNED  NOT NULL COMMENT 'flarum_users.id of category owner',
+    shared_with INT UNSIGNED  NOT NULL COMMENT 'flarum_users.id of recipient',
+    permission  ENUM('view', 'edit') NOT NULL DEFAULT 'view',
+    created_at  DATETIME      DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_category_shared (category_id, shared_with),
+    INDEX idx_shared_with (shared_with),
+    INDEX idx_owner_id (owner_id),
+    FOREIGN KEY (category_id) REFERENCES user_categories(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='Category sharing relationships between users';
+
+
+-- ============================================================
+-- Schema migrations
+-- ============================================================
+ALTER TABLE user_categories ADD COLUMN pinned TINYINT(1) DEFAULT 0 AFTER sort_order;
+ALTER TABLE user_categories ADD COLUMN icon_color VARCHAR(20) DEFAULT NULL AFTER pinned;
+
+
+-- ============================================================
+-- Global Team Library seed data (user_id=0 as virtual owner)
+-- ============================================================
+INSERT IGNORE INTO user_categories (id, user_id, parent_id, name, sort_order)
+VALUES ('global-jlu-mcns-mec', 0, NULL, 'JLU-MCNS-MEC', 0);

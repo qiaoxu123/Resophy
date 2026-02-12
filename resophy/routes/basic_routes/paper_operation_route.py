@@ -81,9 +81,22 @@ def register_paper_operation_routes(
 
     def find_paper(paper_id: str) -> Optional[Tuple[Paper, List[str], str]]:
         entry = paper_store.get_entry(paper_id)
-        if not entry:
-            return None
-        return entry.paper, list(entry.category_path), entry.category_id
+        if entry:
+            return entry.paper, list(entry.category_path), entry.category_id
+        # DB fallback (for global library papers after server restart)
+        db_paper = dal.get_paper(paper_id)
+        if db_paper and db_paper.get("pdf_storage_path"):
+            paper = Paper.from_dict({
+                "id": db_paper["id"],
+                "title": db_paper.get("title", ""),
+                "authors": db_paper.get("authors", ""),
+                "abstract": db_paper.get("abstract", ""),
+                "filename": os.path.basename(db_paper["pdf_storage_path"]),
+                "file_path": db_paper["pdf_storage_path"],
+                "original_filename": db_paper.get("original_filename", ""),
+            })
+            return paper, [], None
+        return None
 
     def collect_papers_by_ids(paper_ids: Iterable[str]) -> List[Paper]:
         ordered_ids = list(paper_ids)

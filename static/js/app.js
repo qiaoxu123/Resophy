@@ -42,6 +42,17 @@ let currentViewMode = 'category'; // 'category' | 'translating' | 'analyzing' | 
 let readingListCount = 0; // reading list size
 let readingListPaperIds = new Set(); // ids in reading list
 
+// Shared Library state
+let sharedCategories = [];
+let currentSharedCategoryId = null;
+let currentSharedOwnerId = null;
+let currentSharedPermission = null;
+
+// Global Team Library state
+let globalCategories = null; // full tree from /api/global/categories
+let isGlobalMode = false;    // whether a global category is currently selected
+let currentGlobalCategoryId = null;
+
 // Translation-related
 let translationQueue = []; // translation queue
 let isTranslating = false; // whether translating now
@@ -464,6 +475,7 @@ fileInput.addEventListener('change', handleFileSelect);
     
     // Panel adjustment
     setupSidebarResizing();
+    setupSidebarSplitResizing();
     setupInfoPanelResizing();
 
     // Click on an empty space to close the menu
@@ -527,6 +539,8 @@ async function loadCategories(silent = false) {
         const response = await fetch('/api/categories');
         categories = await response.json();
         renderCategoryTree();
+        // Also load shared categories
+        await loadSharedCategories();
     } catch (error) {
         console.error('Failed to load categories:', error);
         showMessage('Failed to load categories', 'error');
@@ -801,6 +815,25 @@ function selectCategory(categoryId, categoryName, level = null) {
     document.querySelectorAll('.category-item.selected').forEach(item => {
         item.classList.remove('selected');
     });
+    // Clear shared library selection
+    document.querySelectorAll('.shared-category-item.selected').forEach(item => {
+        item.classList.remove('selected');
+    });
+    // Clear global library selection
+    document.querySelectorAll('.global-category-item.selected').forEach(item => {
+        item.classList.remove('selected');
+    });
+    currentSharedCategoryId = null;
+    currentSharedOwnerId = null;
+    currentSharedPermission = null;
+    isGlobalMode = false;
+    currentGlobalCategoryId = null;
+
+    // Restore upload buttons visibility
+    const uploadBtn = document.getElementById('upload-btn');
+    const uploadArxivBtn = document.getElementById('upload-arxiv-btn');
+    if (uploadBtn) uploadBtn.style.display = '';
+    if (uploadArxivBtn) uploadArxivBtn.style.display = '';
 
     // Add selected state
     const categoryElement = document.querySelector(`[data-category-id="${categoryId}"]`);
@@ -1945,13 +1978,18 @@ function handleFilesWithCategory(files, categoryId) {
 
 // use PDF.js Parse metadata and upload
 async function uploadFile(file, categoryId) {
+    // If in global mode, route to global upload endpoint
+    if (isGlobalMode && currentGlobalCategoryId) {
+        return uploadFileGlobal(file, currentGlobalCategoryId);
+    }
+
     const formData = new FormData();
     formData.append('file', file);
     formData.append('category_id', categoryId);
 
     // No more front-end analysis, everything is handed over to the back-end for processing（Use font size + arXiv search）
     // This is more accurate and does not block user operations
-    
+
     try {
         // 异步上传，完全静默处理，不显示任何提示
         fetch('/api/upload', {
@@ -2000,6 +2038,38 @@ async function uploadFile(file, categoryId) {
         
     } catch (error) {
         console.error('Upload request failed:', error);
+        showMessage('Upload failed', 'error');
+    }
+}
+
+// Upload file to global team library
+async function uploadFileGlobal(file, categoryId) {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('category_id', categoryId);
+
+    try {
+        fetch('/api/global/upload', {
+            method: 'POST',
+            body: formData,
+        }).then(response => response.json())
+        .then(result => {
+            if (result.success) {
+                // Refresh global papers if we're still viewing this category
+                if (isGlobalMode && currentGlobalCategoryId === categoryId) {
+                    loadGlobalPapers(currentGlobalCategoryId);
+                }
+                // Refresh global category tree (paper counts)
+                loadSharedCategories();
+            } else {
+                showMessage(`Upload failed: ${result.error}`, 'error');
+            }
+        }).catch(error => {
+            console.error('Global upload failed:', error);
+            showMessage(`${file.name} upload failed`, 'error');
+        });
+    } catch (error) {
+        console.error('Global upload request failed:', error);
         showMessage('Upload failed', 'error');
     }
 }
@@ -2583,6 +2653,12 @@ function setupContextMenu() {
         });
     });
 
+    document.getElementById('share-category').addEventListener('click', () => {
+        const categoryId = contextMenu.dataset.categoryId;
+        showShareDialog(categoryId);
+        contextMenu.style.display = 'none';
+    });
+
     document.getElementById('export-bibtex').addEventListener('click', () => {
         const categoryId = contextMenu.dataset.categoryId;
         exportCategoryBibtex(categoryId);
@@ -2926,6 +3002,13 @@ function setupPaperContextMenu() {
 // Show paper right-click menu
 function showPaperContextMenu(e, paperId) {
     paperContextMenu.dataset.paperId = paperId;
+
+    // In shared view-only mode, hide delete and other modification options
+    const deleteItem = document.getElementById('paper-delete');
+    if (deleteItem) {
+        deleteItem.style.display = currentSharedCategoryId && currentSharedPermission === 'view' ? 'none' : '';
+    }
+
     // Use smart positioning
     positionContextMenu(paperContextMenu, e.pageX, e.pageY);
 }
@@ -3838,22 +3921,39 @@ async function deletePaper(paperId, event = null) {
         papers = papers.filter(p => p.id !== paperId);
         renderPapersList();
 
-        const response = await fetch(`/api/paper/${paperId}`, { method: 'DELETE' });
+        // Route to global endpoint if in global mode
+        const deleteUrl = isGlobalMode
+            ? `/api/global/paper/${paperId}`
+            : `/api/paper/${paperId}`;
+
+        const response = await fetch(deleteUrl, { method: 'DELETE' });
         if (response.ok) {
             showMessage('Paper deleted successfully', 'success');
-            await updateCategoriesData();
-            renderCategoryTreeWithState();
-            updateReadingListCount();
+            if (isGlobalMode) {
+                await loadSharedCategories();
+            } else {
+                await updateCategoriesData();
+                renderCategoryTreeWithState();
+                updateReadingListCount();
+            }
         } else {
             const error = await response.json();
             showMessage(`Delete failed: ${error.error}`, 'error');
             // Rollback: Reload the list
-            if (currentCategoryId) loadPapers(currentCategoryId);
+            if (isGlobalMode && currentGlobalCategoryId) {
+                loadGlobalPapers(currentGlobalCategoryId);
+            } else if (currentCategoryId) {
+                loadPapers(currentCategoryId);
+            }
         }
     } catch (error) {
         console.error('Failed to delete paper:', error);
         showMessage('Deletion failed, please try again later', 'error');
-        if (currentCategoryId) loadPapers(currentCategoryId);
+        if (isGlobalMode && currentGlobalCategoryId) {
+            loadGlobalPapers(currentGlobalCategoryId);
+        } else if (currentCategoryId) {
+            loadPapers(currentCategoryId);
+        }
     }
 }
 
@@ -5534,7 +5634,10 @@ async function updateAvatars() {
                 // Use pixel avatar when loading fails
                 drawIdenticon(canvas, userName);
             };
-            img.src = avatarUrl + '?t=' + Date.now(); // Add timestamp to avoid caching
+            // img.src bypasses fetch wrapper, so attach JWT as query param
+            const _token = localStorage.getItem('resophy_token');
+            const _qp = _token ? `token=${encodeURIComponent(_token)}&` : '';
+            img.src = avatarUrl + '?' + _qp + 't=' + Date.now();
         } else {
             // Use generated pixel avatar
             drawIdenticon(canvas, userName);
@@ -5684,6 +5787,19 @@ async function initSettingsPage() {
         setupSettingsNavigation();
         setupHeatmapControls();
         setupUserProfileEvents();
+        // Logout button
+        const logoutBtn = document.getElementById('setting-logout-btn');
+        if (logoutBtn) {
+            logoutBtn.addEventListener('click', async () => {
+                if (!confirm('Are you sure you want to logout?')) return;
+                try {
+                    await fetch('/api/auth/logout', { method: 'POST' });
+                } catch (_) { /* ignore */ }
+                localStorage.removeItem('resophy_token');
+                localStorage.removeItem('resophy_user');
+                window.location.href = '/login';
+            });
+        }
         settingsNavInitialized = true;
     }
     // First load user settings and reading history to cache（Force refresh）
@@ -9026,6 +9142,48 @@ function setupSidebarResizing() {
             document.removeEventListener('mouseup', onMouseUp);
         };
         
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    });
+}
+
+// Sidebar split resizer (My Library / Shared Library vertical ratio)
+function setupSidebarSplitResizing() {
+    const resizer = document.getElementById('sidebar-split-resizer');
+    const categoryTree = document.getElementById('category-tree');
+    const sharedTree = document.getElementById('shared-category-tree');
+    if (!resizer || !categoryTree || !sharedTree) return;
+
+    resizer.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const startY = e.pageY;
+        const startMyH = categoryTree.offsetHeight;
+        const startSharedH = sharedTree.offsetHeight;
+        const totalH = startMyH + startSharedH;
+
+        resizer.classList.add('resizing');
+
+        const onMouseMove = (e) => {
+            e.preventDefault();
+            const diff = e.pageY - startY;
+            const newMyH = Math.max(60, Math.min(totalH - 60, startMyH + diff));
+            const newSharedH = totalH - newMyH;
+            requestAnimationFrame(() => {
+                categoryTree.style.flex = 'none';
+                sharedTree.style.flex = 'none';
+                categoryTree.style.height = newMyH + 'px';
+                sharedTree.style.height = newSharedH + 'px';
+            });
+        };
+
+        const onMouseUp = () => {
+            resizer.classList.remove('resizing');
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+        };
+
         document.addEventListener('mousemove', onMouseMove);
         document.addEventListener('mouseup', onMouseUp);
     });
@@ -13296,7 +13454,7 @@ async function checkAndShowOnboarding() {
     async function initOnboarding() {
         await checkAndShowOnboarding();
     }
-    
+
     // if DOM Loading is complete, execute immediately
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initOnboarding);
@@ -13305,4 +13463,642 @@ async function checkAndShowOnboarding() {
         initOnboarding();
     }
 })();
+
+
+// =========================================================================
+// Shared Library
+// =========================================================================
+
+async function loadSharedCategories() {
+    try {
+        // Load global team library + shared categories in parallel
+        const [globalResp, sharedResp] = await Promise.all([
+            fetch('/api/global/categories'),
+            fetch('/api/shared/categories'),
+        ]);
+        if (globalResp.ok) {
+            globalCategories = await globalResp.json();
+        }
+        if (sharedResp.ok) {
+            sharedCategories = await sharedResp.json();
+        }
+        renderSharedCategoryTree();
+    } catch (error) {
+        console.error('Failed to load shared categories:', error);
+    }
+}
+
+function renderSharedCategoryTree() {
+    const container = document.getElementById('shared-category-tree');
+    const header = document.getElementById('shared-library-header');
+    if (!container || !header) return;
+
+    container.innerHTML = '';
+    header.style.display = 'flex';
+
+    // 1) Render Global Team Library first
+    const hasGlobal = globalCategories && globalCategories.children && globalCategories.children.length > 0;
+    if (hasGlobal) {
+        for (const rootNode of globalCategories.children) {
+            const el = createGlobalCategoryElement(rootNode, 0);
+            container.appendChild(el);
+        }
+    }
+
+    // 2) Render user-shared categories
+    if (!sharedCategories || sharedCategories.length === 0) {
+        if (!hasGlobal) {
+            container.innerHTML = '<div class="shared-empty-hint"><i class="fas fa-info-circle"></i> No shared categories yet</div>';
+        }
+        return;
+    }
+
+    // Group by owner
+    const grouped = {};
+    for (const share of sharedCategories) {
+        if (!grouped[share.owner_id]) {
+            grouped[share.owner_id] = {
+                owner_name: share.owner_name,
+                shares: [],
+            };
+        }
+        grouped[share.owner_id].shares.push(share);
+    }
+
+    for (const [ownerId, group] of Object.entries(grouped)) {
+        // Owner label
+        const label = document.createElement('div');
+        label.className = 'shared-owner-label';
+        label.innerHTML = `<i class="fas fa-user"></i> ${group.owner_name}`;
+        container.appendChild(label);
+
+        // Render each shared category tree
+        for (const share of group.shares) {
+            const el = createSharedCategoryElement(share, share.tree, 0);
+            container.appendChild(el);
+        }
+    }
+}
+
+// =========================================================================
+// Global Team Library rendering
+// =========================================================================
+
+function createGlobalCategoryElement(node, level) {
+    const wrapper = document.createElement('div');
+
+    const item = document.createElement('div');
+    item.className = 'global-category-item';
+    item.style.paddingLeft = `${10 + level * 14}px`;
+    item.dataset.globalCategoryId = node.id;
+
+    const iconColor = node.iconColor || '#2563eb';
+    const isRoot = level === 0;
+    const teamBadge = isRoot ? '<span class="global-team-badge">Team</span>' : '';
+    const paperCount = node.paper_count != null ? `<span class="global-paper-count">${node.paper_count}</span>` : '';
+    const folderIcon = isRoot ? 'fa-building' : 'fa-folder';
+
+    item.innerHTML = `
+        <span class="shared-cat-icon"><i class="fas ${folderIcon}" style="color: ${iconColor};"></i></span>
+        <span class="shared-cat-name">${node.name}</span>
+        ${teamBadge}
+        ${paperCount}
+    `;
+
+    item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        selectGlobalCategory(node.id, node.name);
+    });
+
+    // Right-click context menu for global categories
+    item.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showGlobalContextMenu(e, node.id, node.name, isRoot);
+    });
+
+    wrapper.appendChild(item);
+
+    // Render children
+    if (node.children && node.children.length > 0) {
+        const childrenDiv = document.createElement('div');
+        childrenDiv.className = 'shared-children';
+        for (const child of node.children) {
+            childrenDiv.appendChild(createGlobalCategoryElement(child, level + 1));
+        }
+        wrapper.appendChild(childrenDiv);
+    }
+
+    return wrapper;
+}
+
+function selectGlobalCategory(categoryId, categoryName) {
+    // Clear My Library selection
+    document.querySelectorAll('.category-item.selected').forEach(item => {
+        item.classList.remove('selected');
+    });
+    // Clear shared selection
+    document.querySelectorAll('.shared-category-item.selected').forEach(item => {
+        item.classList.remove('selected');
+    });
+    // Clear previous global selection
+    document.querySelectorAll('.global-category-item.selected').forEach(item => {
+        item.classList.remove('selected');
+    });
+
+    // Select this global category
+    const el = document.querySelector(`.global-category-item[data-global-category-id="${categoryId}"]`);
+    if (el) {
+        el.classList.add('selected');
+    }
+
+    isGlobalMode = true;
+    currentGlobalCategoryId = categoryId;
+    currentSharedCategoryId = null;
+    currentSharedOwnerId = null;
+    currentSharedPermission = null;
+    currentCategoryId = null;
+
+    currentCategoryTitle.textContent = categoryName;
+
+    // Show upload buttons (global has full access)
+    const uploadBtn = document.getElementById('upload-btn');
+    const uploadArxivBtn = document.getElementById('upload-arxiv-btn');
+    if (uploadBtn) uploadBtn.style.display = '';
+    if (uploadArxivBtn) uploadArxivBtn.style.display = '';
+
+    loadGlobalPapers(categoryId);
+}
+
+async function loadGlobalPapers(categoryId) {
+    try {
+        currentViewMode = 'category';
+        saveCurrentViewState();
+
+        const readingListLabel = document.getElementById('reading-list-label');
+        if (readingListLabel) {
+            readingListLabel.style.display = 'none';
+        }
+
+        papersList.innerHTML = `
+            <div class="empty-state" style="opacity:.7">
+                <i class="fas fa-file-pdf"></i>
+                <p>loading...</p>
+            </div>
+        `;
+
+        const response = await fetch(`/api/global/papers/${categoryId}/recursive`);
+        if (!response.ok) {
+            const err = await response.json();
+            showMessage(err.error || 'Failed to load global papers', 'error');
+            return;
+        }
+
+        const data = await response.json();
+        papers = data;
+        renderPapersList();
+    } catch (error) {
+        console.error('Failed to load global papers:', error);
+        showMessage('Failed to load global papers', 'error');
+    }
+}
+
+// =========================================================================
+// Global Library Context Menu
+// =========================================================================
+
+function showGlobalContextMenu(e, categoryId, categoryName, isRoot) {
+    // Remove any existing global context menu
+    const existing = document.getElementById('global-context-menu');
+    if (existing) existing.remove();
+
+    const menu = document.createElement('div');
+    menu.id = 'global-context-menu';
+    menu.className = 'context-menu';
+    menu.style.display = 'block';
+
+    menu.innerHTML = `
+        <ul>
+            <li data-action="add-sub"><i class="fas fa-plus"></i> Add subcategory</li>
+            ${!isRoot ? '<li data-action="rename"><i class="fas fa-edit"></i> Rename</li>' : ''}
+            ${!isRoot ? '<li data-action="delete"><i class="fas fa-trash"></i> Delete</li>' : ''}
+        </ul>
+    `;
+
+    document.body.appendChild(menu);
+    positionContextMenu(menu, e.pageX, e.pageY);
+
+    // Handle click
+    menu.querySelectorAll('li').forEach(li => {
+        li.addEventListener('click', async () => {
+            const action = li.dataset.action;
+            menu.remove();
+            if (action === 'add-sub') {
+                const name = prompt('New subcategory name:');
+                if (name && name.trim()) {
+                    await globalCreateCategory(name.trim(), categoryId);
+                }
+            } else if (action === 'rename') {
+                const newName = prompt('New name:', categoryName);
+                if (newName && newName.trim() && newName.trim() !== categoryName) {
+                    await globalRenameCategory(categoryId, newName.trim());
+                }
+            } else if (action === 'delete') {
+                if (confirm(`Delete category "${categoryName}" and all its subcategories?`)) {
+                    await globalDeleteCategory(categoryId);
+                }
+            }
+        });
+    });
+
+    // Close on click outside
+    const closeHandler = (ev) => {
+        if (!menu.contains(ev.target)) {
+            menu.remove();
+            document.removeEventListener('click', closeHandler);
+        }
+    };
+    setTimeout(() => document.addEventListener('click', closeHandler), 0);
+}
+
+async function globalCreateCategory(name, parentId) {
+    try {
+        const response = await fetch('/api/global/categories', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, parent_id: parentId }),
+        });
+        const result = await response.json();
+        if (result.success) {
+            showMessage('Category created', 'success');
+            await loadSharedCategories();
+        } else {
+            showMessage(result.error || 'Failed to create category', 'error');
+        }
+    } catch (error) {
+        console.error('Failed to create global category:', error);
+        showMessage('Failed to create category', 'error');
+    }
+}
+
+async function globalRenameCategory(categoryId, newName) {
+    try {
+        const response = await fetch(`/api/global/categories/${categoryId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newName }),
+        });
+        const result = await response.json();
+        if (result.success) {
+            showMessage('Category renamed', 'success');
+            await loadSharedCategories();
+        } else {
+            showMessage(result.error || 'Failed to rename category', 'error');
+        }
+    } catch (error) {
+        console.error('Failed to rename global category:', error);
+        showMessage('Failed to rename category', 'error');
+    }
+}
+
+async function globalDeleteCategory(categoryId) {
+    try {
+        const response = await fetch(`/api/global/categories/${categoryId}`, {
+            method: 'DELETE',
+        });
+        const result = await response.json();
+        if (result.success) {
+            showMessage('Category deleted', 'success');
+            // If the deleted category was selected, clear selection
+            if (currentGlobalCategoryId === categoryId) {
+                isGlobalMode = false;
+                currentGlobalCategoryId = null;
+            }
+            await loadSharedCategories();
+        } else {
+            showMessage(result.error || 'Failed to delete category', 'error');
+        }
+    } catch (error) {
+        console.error('Failed to delete global category:', error);
+        showMessage('Failed to delete category', 'error');
+    }
+}
+
+function createSharedCategoryElement(share, node, level) {
+    const wrapper = document.createElement('div');
+
+    const item = document.createElement('div');
+    item.className = 'shared-category-item';
+    item.style.paddingLeft = `${10 + level * 14}px`;
+    item.dataset.sharedCategoryId = node.id;
+    item.dataset.ownerId = share.owner_id;
+    item.dataset.permission = share.permission;
+
+    const iconColor = node.iconColor || share.icon_color || '#7d4a9d';
+    item.innerHTML = `
+        <span class="shared-cat-icon"><i class="fas fa-folder" style="color: ${iconColor};"></i></span>
+        <span class="shared-cat-name">${node.name}</span>
+        <span class="shared-perm-icon ${share.permission === 'edit' ? 'perm-edit' : 'perm-view'}" title="${share.permission}">
+            <i class="fas ${share.permission === 'edit' ? 'fa-pen' : 'fa-eye'}"></i>
+        </span>
+    `;
+
+    item.addEventListener('click', () => {
+        selectSharedCategory(node.id, node.name, share.owner_id, share.permission);
+    });
+
+    wrapper.appendChild(item);
+
+    // Render children
+    if (node.children && node.children.length > 0) {
+        const childrenDiv = document.createElement('div');
+        childrenDiv.className = 'shared-children';
+        for (const child of node.children) {
+            childrenDiv.appendChild(createSharedCategoryElement(share, child, level + 1));
+        }
+        wrapper.appendChild(childrenDiv);
+    }
+
+    return wrapper;
+}
+
+function selectSharedCategory(categoryId, categoryName, ownerId, permission) {
+    // Clear My Library selection
+    document.querySelectorAll('.category-item.selected').forEach(item => {
+        item.classList.remove('selected');
+    });
+    // Clear previous shared selection
+    document.querySelectorAll('.shared-category-item.selected').forEach(item => {
+        item.classList.remove('selected');
+    });
+    // Clear global selection
+    document.querySelectorAll('.global-category-item.selected').forEach(item => {
+        item.classList.remove('selected');
+    });
+
+    // Select this shared category
+    const el = document.querySelector(`.shared-category-item[data-shared-category-id="${categoryId}"][data-owner-id="${ownerId}"]`);
+    if (el) {
+        el.classList.add('selected');
+    }
+
+    currentSharedCategoryId = categoryId;
+    currentSharedOwnerId = ownerId;
+    currentSharedPermission = permission;
+    currentCategoryId = null; // Clear my library selection
+    isGlobalMode = false;
+    currentGlobalCategoryId = null;
+
+    currentCategoryTitle.textContent = categoryName;
+    updateSharedModeUI(permission);
+    loadSharedPapers(categoryId, ownerId);
+}
+
+async function loadSharedPapers(categoryId, ownerId) {
+    try {
+        currentViewMode = 'category';
+        saveCurrentViewState();
+
+        const readingListLabel = document.getElementById('reading-list-label');
+        if (readingListLabel) {
+            readingListLabel.style.display = 'none';
+        }
+
+        papersList.innerHTML = `
+            <div class="empty-state" style="opacity:.7">
+                <i class="fas fa-file-pdf"></i>
+                <p>loading...</p>
+            </div>
+        `;
+
+        const response = await fetch(`/api/shared/papers/${categoryId}/recursive?owner_id=${ownerId}`);
+        if (!response.ok) {
+            const err = await response.json();
+            showMessage(err.error || 'Failed to load shared papers', 'error');
+            return;
+        }
+
+        const data = await response.json();
+        papers = data;
+        renderPapersList();
+    } catch (error) {
+        console.error('Failed to load shared papers:', error);
+        showMessage('Failed to load shared papers', 'error');
+    }
+}
+
+function updateSharedModeUI(permission) {
+    const uploadBtn = document.getElementById('upload-btn');
+    const uploadArxivBtn = document.getElementById('upload-arxiv-btn');
+
+    if (permission === 'view') {
+        if (uploadBtn) uploadBtn.style.display = 'none';
+        if (uploadArxivBtn) uploadArxivBtn.style.display = 'none';
+    } else {
+        if (uploadBtn) uploadBtn.style.display = '';
+        if (uploadArxivBtn) uploadArxivBtn.style.display = '';
+    }
+}
+
+// =========================================================================
+// Share Dialog
+// =========================================================================
+
+let shareDialogCategoryId = null;
+let shareSearchDebounceTimer = null;
+
+function showShareDialog(categoryId) {
+    shareDialogCategoryId = categoryId;
+
+    // Remove existing modal if any
+    const existing = document.getElementById('share-modal-container');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'share-modal-container';
+    overlay.className = 'share-modal-overlay';
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closeShareDialog();
+    });
+
+    overlay.innerHTML = `
+        <div class="share-modal">
+            <div class="share-modal-header">
+                <h3><i class="fas fa-share-nodes"></i> Share Category</h3>
+                <button class="share-modal-close" onclick="closeShareDialog()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="share-modal-body">
+                <div class="share-search-wrapper">
+                    <input type="text" id="share-user-search" placeholder="Search users to share with..." autocomplete="off" />
+                    <div class="share-search-results" id="share-search-results"></div>
+                </div>
+                <div class="share-list" id="share-current-list">
+                    <div class="share-list-title">Shared with</div>
+                    <div id="share-list-items" style="color:#999;font-size:13px;">Loading...</div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    // Load current shares
+    loadCurrentShares(categoryId);
+
+    // Set up search
+    const searchInput = document.getElementById('share-user-search');
+    searchInput.addEventListener('input', () => {
+        clearTimeout(shareSearchDebounceTimer);
+        shareSearchDebounceTimer = setTimeout(() => {
+            searchUsersForShare(searchInput.value.trim());
+        }, 300);
+    });
+
+    searchInput.focus();
+}
+
+function closeShareDialog() {
+    const modal = document.getElementById('share-modal-container');
+    if (modal) modal.remove();
+    shareDialogCategoryId = null;
+}
+
+async function loadCurrentShares(categoryId) {
+    const listEl = document.getElementById('share-list-items');
+    if (!listEl) return;
+
+    try {
+        const response = await fetch(`/api/categories/${categoryId}/shares`);
+        if (!response.ok) {
+            listEl.innerHTML = '<span style="color:#ef5350">Failed to load shares</span>';
+            return;
+        }
+
+        const shares = await response.json();
+        if (shares.length === 0) {
+            listEl.innerHTML = '<span>Not shared with anyone yet</span>';
+            return;
+        }
+
+        listEl.innerHTML = '';
+        for (const share of shares) {
+            const item = document.createElement('div');
+            item.className = 'share-list-item';
+            item.innerHTML = `
+                <i class="fas fa-user" style="color:#7d4a9d;"></i>
+                <span class="share-user-name">${share.username}</span>
+                <select class="share-perm-select" data-user-id="${share.shared_with}" data-category-id="${categoryId}">
+                    <option value="view" ${share.permission === 'view' ? 'selected' : ''}>View</option>
+                    <option value="edit" ${share.permission === 'edit' ? 'selected' : ''}>Edit</option>
+                </select>
+                <button class="btn-remove-share" data-user-id="${share.shared_with}" data-category-id="${categoryId}" title="Remove">
+                    <i class="fas fa-times"></i>
+                </button>
+            `;
+            listEl.appendChild(item);
+        }
+
+        // Permission change handlers
+        listEl.querySelectorAll('.share-perm-select').forEach(sel => {
+            sel.addEventListener('change', async () => {
+                const uid = sel.dataset.userId;
+                const cid = sel.dataset.categoryId;
+                await fetch(`/api/categories/${cid}/share/${uid}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ permission: sel.value }),
+                });
+            });
+        });
+
+        // Remove share handlers
+        listEl.querySelectorAll('.btn-remove-share').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const uid = btn.dataset.userId;
+                const cid = btn.dataset.categoryId;
+                await fetch(`/api/categories/${cid}/share/${uid}`, {
+                    method: 'DELETE',
+                });
+                loadCurrentShares(cid);
+            });
+        });
+
+    } catch (error) {
+        console.error('Failed to load shares:', error);
+        listEl.innerHTML = '<span style="color:#ef5350">Error loading shares</span>';
+    }
+}
+
+async function searchUsersForShare(query) {
+    const resultsEl = document.getElementById('share-search-results');
+    if (!resultsEl) return;
+
+    if (!query) {
+        resultsEl.style.display = 'none';
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/users/search?q=${encodeURIComponent(query)}`);
+        if (!response.ok) return;
+
+        const users = await response.json();
+        if (users.length === 0) {
+            resultsEl.innerHTML = '<div style="padding:8px 12px;color:#999;font-size:13px;">No users found</div>';
+            resultsEl.style.display = 'block';
+            return;
+        }
+
+        resultsEl.innerHTML = '';
+        for (const user of users) {
+            const item = document.createElement('div');
+            item.className = 'share-search-result-item';
+            item.innerHTML = `
+                <i class="fas fa-user" style="color:#7d4a9d;"></i>
+                <span>${user.nickname || user.username}</span>
+                <span style="color:#999;font-size:11px;">@${user.username}</span>
+            `;
+            item.addEventListener('click', () => {
+                shareWithUser(user.id, shareDialogCategoryId);
+            });
+            resultsEl.appendChild(item);
+        }
+        resultsEl.style.display = 'block';
+
+    } catch (error) {
+        console.error('Failed to search users:', error);
+    }
+}
+
+async function shareWithUser(userId, categoryId) {
+    try {
+        const response = await fetch(`/api/categories/${categoryId}/share`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: userId, permission: 'view' }),
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            showMessage(err.error || 'Failed to share', 'error');
+            return;
+        }
+
+        // Hide search results, clear input
+        const resultsEl = document.getElementById('share-search-results');
+        const searchInput = document.getElementById('share-user-search');
+        if (resultsEl) resultsEl.style.display = 'none';
+        if (searchInput) searchInput.value = '';
+
+        // Reload the shares list
+        loadCurrentShares(categoryId);
+        showMessage('Category shared successfully', 'success');
+
+    } catch (error) {
+        console.error('Failed to share:', error);
+        showMessage('Failed to share category', 'error');
+    }
+}
 

@@ -15,6 +15,9 @@ from typing import Any, Dict, List, Optional
 
 from resophy.db import get_db
 
+# Virtual user_id for the global team library (JLU-MCNS-MEC)
+GLOBAL_LIBRARY_USER_ID = 0
+
 
 # ===================================================================
 # 1. User Settings
@@ -841,3 +844,243 @@ def search_papers_db(query: str, limit: int = 50) -> List[Dict[str, Any]]:
                 (query, query, limit),
             )
             return cur.fetchall()
+
+
+# ===================================================================
+# 7. Shared Categories
+# ===================================================================
+
+def share_category(
+    owner_id: int,
+    category_id: str,
+    shared_with_id: int,
+    permission: str = "view",
+) -> bool:
+    """
+    UPSERT a sharing record.  If already shared, update the permission.
+
+    Returns True on success.
+    """
+    if permission not in ("view", "edit"):
+        raise ValueError(f"Invalid permission: {permission}")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO shared_categories "
+                "(category_id, owner_id, shared_with, permission) "
+                "VALUES (%s, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE permission = VALUES(permission)",
+                (category_id, owner_id, shared_with_id, permission),
+            )
+        conn.commit()
+    return True
+
+
+def unshare_category(owner_id: int, category_id: str, shared_with_id: int) -> bool:
+    """Remove a sharing record.  Returns True if a row was deleted."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM shared_categories "
+                "WHERE category_id = %s AND owner_id = %s AND shared_with = %s",
+                (category_id, owner_id, shared_with_id),
+            )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def get_shared_categories_for_user(user_id: int) -> List[Dict[str, Any]]:
+    """
+    Return categories that others have shared with *user_id*.
+
+    Each row includes the category info, owner info, and permission.
+    """
+    from resophy.db import get_flarum_db
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT sc.id AS share_id, sc.category_id, sc.owner_id, "
+                "sc.permission, sc.created_at AS shared_at, "
+                "uc.name AS category_name, uc.parent_id, uc.icon_color "
+                "FROM shared_categories sc "
+                "JOIN user_categories uc ON sc.category_id = uc.id "
+                "WHERE sc.shared_with = %s "
+                "ORDER BY sc.owner_id, uc.name",
+                (user_id,),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        return []
+
+    # Fetch owner display names from Flarum
+    owner_ids = list({r["owner_id"] for r in rows})
+    owner_names: Dict[int, str] = {}
+    try:
+        with get_flarum_db() as fconn:
+            with fconn.cursor() as fcur:
+                placeholders = ", ".join(["%s"] * len(owner_ids))
+                fcur.execute(
+                    f"SELECT id, username, nickname FROM users "
+                    f"WHERE id IN ({placeholders})",
+                    owner_ids,
+                )
+                for u in fcur.fetchall():
+                    owner_names[u["id"]] = u.get("nickname") or u["username"]
+    except Exception:
+        for oid in owner_ids:
+            owner_names.setdefault(oid, f"User#{oid}")
+
+    for row in rows:
+        row["owner_name"] = owner_names.get(row["owner_id"], f"User#{row['owner_id']}")
+
+    return rows
+
+
+def get_shared_category_tree(owner_id: int, category_id: str) -> Dict[str, Any]:
+    """
+    Build the subtree rooted at *category_id* from *owner_id*'s categories.
+
+    Same structure as ``get_categories_tree`` but scoped to one subtree.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Get all categories of the owner
+            cur.execute(
+                "SELECT id, parent_id, name, sort_order, pinned, icon_color "
+                "FROM user_categories WHERE user_id = %s "
+                "ORDER BY sort_order, created_at",
+                (owner_id,),
+            )
+            all_rows = cur.fetchall()
+
+    # Build lookup
+    nodes: Dict[str, Dict[str, Any]] = {}
+    for row in all_rows:
+        node: Dict[str, Any] = {
+            "id": row["id"],
+            "name": row["name"],
+            "children": [],
+            "_parent_id": row["parent_id"],
+        }
+        if row.get("icon_color"):
+            node["iconColor"] = row["icon_color"]
+        nodes[row["id"]] = node
+
+    if category_id not in nodes:
+        return {"id": category_id, "name": "Unknown", "children": []}
+
+    # Build parent→children relationships
+    for node in nodes.values():
+        parent_id = node.pop("_parent_id")
+        if parent_id and parent_id in nodes:
+            nodes[parent_id]["children"].append(node)
+
+    return nodes[category_id]
+
+
+def get_share_permission(
+    user_id: int, category_id: str
+) -> Optional[str]:
+    """
+    Check whether *user_id* has access to *category_id* via sharing.
+
+    Walks up the ancestor chain: if any ancestor is shared, returns
+    the permission ('view' or 'edit').  Returns None if not shared.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            current_id: Optional[str] = category_id
+            visited: set[str] = set()
+
+            while current_id and current_id not in visited:
+                visited.add(current_id)
+
+                # Check if this category is directly shared
+                cur.execute(
+                    "SELECT permission FROM shared_categories "
+                    "WHERE category_id = %s AND shared_with = %s",
+                    (current_id, user_id),
+                )
+                row = cur.fetchone()
+                if row:
+                    return row["permission"]
+
+                # Walk up to parent
+                cur.execute(
+                    "SELECT parent_id FROM user_categories WHERE id = %s",
+                    (current_id,),
+                )
+                parent_row = cur.fetchone()
+                current_id = parent_row["parent_id"] if parent_row else None
+
+    return None
+
+
+def get_category_shares(
+    owner_id: int, category_id: str
+) -> List[Dict[str, Any]]:
+    """Return the list of users a category is shared with + their permissions."""
+    from resophy.db import get_flarum_db
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, shared_with, permission, created_at "
+                "FROM shared_categories "
+                "WHERE category_id = %s AND owner_id = %s",
+                (category_id, owner_id),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        return []
+
+    # Fetch user names from Flarum
+    user_ids = [r["shared_with"] for r in rows]
+    user_names: Dict[int, str] = {}
+    try:
+        with get_flarum_db() as fconn:
+            with fconn.cursor() as fcur:
+                placeholders = ", ".join(["%s"] * len(user_ids))
+                fcur.execute(
+                    f"SELECT id, username, nickname FROM users "
+                    f"WHERE id IN ({placeholders})",
+                    user_ids,
+                )
+                for u in fcur.fetchall():
+                    user_names[u["id"]] = u.get("nickname") or u["username"]
+    except Exception:
+        pass
+
+    for row in rows:
+        row["username"] = user_names.get(row["shared_with"], f"User#{row['shared_with']}")
+
+    return rows
+
+
+def search_flarum_users(
+    search: str, exclude_user_id: Optional[int] = None, limit: int = 10
+) -> List[Dict[str, Any]]:
+    """Search Flarum users by username or nickname (for share dialog)."""
+    from resophy.db import get_flarum_db
+
+    with get_flarum_db() as fconn:
+        with fconn.cursor() as fcur:
+            query = (
+                "SELECT id, username, nickname, avatar_url "
+                "FROM users WHERE (username LIKE %s OR nickname LIKE %s)"
+            )
+            params: list = [f"%{search}%", f"%{search}%"]
+
+            if exclude_user_id:
+                query += " AND id != %s"
+                params.append(exclude_user_id)
+
+            query += " LIMIT %s"
+            params.append(limit)
+
+            fcur.execute(query, params)
+            return fcur.fetchall()

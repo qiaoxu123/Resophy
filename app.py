@@ -32,6 +32,7 @@ from resophy.routes.basic_routes.paper_operation_route import (
 )
 from resophy.routes.basic_routes.auth_route import register_auth_routes
 from resophy.routes.basic_routes.search_route import register_search_routes
+from resophy.routes.basic_routes.share_route import register_share_routes
 from resophy.routes.basic_routes.settings_route import register_settings_routes
 from resophy.routes.basic_routes.update_from_url_route import (
     register_update_from_url_routes,
@@ -417,6 +418,7 @@ def login_page():
 def register_routes():
     """Register all routes (must be called after init_app)"""
     register_auth_routes(app, cfg=_app_config)
+    register_share_routes(app, cfg=_app_config, upload_folder=UPLOAD_FOLDER)
 
     register_category_routes(
         app,
