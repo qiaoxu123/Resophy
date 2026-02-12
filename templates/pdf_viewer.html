@@ -124,6 +124,42 @@
     </div>
     
     <script>
+        // Auth: wrap fetch to auto-attach JWT (same as app.js)
+        (function() {
+            const _origFetch = window.fetch;
+            window.fetch = function(url, options = {}) {
+                const token = localStorage.getItem('resophy_token');
+                if (token) {
+                    options.headers = options.headers || {};
+                    if (options.headers instanceof Headers) {
+                        if (!options.headers.has('Authorization')) {
+                            options.headers.set('Authorization', 'Bearer ' + token);
+                        }
+                    } else {
+                        if (!options.headers['Authorization']) {
+                            options.headers['Authorization'] = 'Bearer ' + token;
+                        }
+                    }
+                }
+                return _origFetch.call(this, url, options).then(response => {
+                    if (response.status === 401 && typeof url === 'string' && url.startsWith('/api/') && !url.startsWith('/api/auth/')) {
+                        localStorage.removeItem('resophy_token');
+                        localStorage.removeItem('resophy_user');
+                        window.location.href = '/login';
+                    }
+                    return response;
+                });
+            };
+        })();
+
+        // Helper: append JWT token as query param for non-fetch URLs (iframe, img)
+        function authUrl(url) {
+            const token = localStorage.getItem('resophy_token');
+            if (!token) return url;
+            const sep = url.includes('?') ? '&' : '?';
+            return url + sep + 'token=' + encodeURIComponent(token);
+        }
+
         // Get paper information and set title
         async function loadPaperInfo() {
             try {
@@ -166,8 +202,8 @@
                     }
                     console.log('PDF file check succeeded');
                     
-                    // Load the raw PDF in iframe to avoid cross-origin issues
-                    iframe.src = pdfUrl;
+                    // Load the raw PDF in iframe (with token for auth)
+                    iframe.src = authUrl(pdfUrl);
                     
                     // Listen for iframe load
                     iframe.onload = function() {
