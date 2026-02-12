@@ -31,14 +31,21 @@ FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# Runtime system deps
+# Runtime system deps (libgl1 + libglib2.0-0 + libxcb1 needed by OpenCV/babeldoc)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libmagic1 \
     curl \
+    libgl1 \
+    libglib2.0-0 \
+    libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy virtual env from builder
 COPY --from=builder /build/.venv /app/.venv
+
+# Fix shebang lines: builder venv path -> runtime venv path
+RUN find /app/.venv/bin -type f -exec \
+    sed -i 's|#!/build/.venv/bin/python3|#!/app/.venv/bin/python3|g' {} + 2>/dev/null || true
 
 # Copy application code
 COPY app.py ./
